@@ -26,6 +26,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Bags uses the camera as a dashcam to detect road obstructions ahead of you.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Bags uses your location to warn you about obstructions ahead and to alert nearby drivers about hazards you pass.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

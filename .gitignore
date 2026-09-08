@@ -45,5 +45,10 @@ app.*.map.json
 /android/app/release
 /android/build/
 
+# Firebase CLI
+firebase-debug.log
+firebase-debug.*.log
+.firebase/
+
 # Widget Preview related
 .widget_preview/
