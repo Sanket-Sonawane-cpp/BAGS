@@ -1,0 +1,21 @@
+# Normalize line endings to LF in the repo, regardless of contributor OS.
+# Prevents Flutter-generated files (plugin registrants, pubspec.lock, .metadata)
+# from showing up as "modified" only because of CRLF/LF differences.
+* text=auto eol=lf
+
+# Keep Windows-only scripts as CRLF.
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+
+# Treat common binary assets as binary (no line-ending or diff munging).
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.ttf   binary
+*.otf   binary
+*.jar   binary
+*.keystore binary
+*.tflite binary
