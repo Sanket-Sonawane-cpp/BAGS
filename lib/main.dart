@@ -3,6 +3,9 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'core/providers.dart';
 import 'core/services/notification_service.dart';
 import 'features/alerts/alerts_screen.dart';
 import 'firebase_options.dart';
@@ -20,9 +23,18 @@ Future<void> main() async {
   // main(), and the handler has to already be attached by then.
   FirebaseMessaging.onBackgroundMessage(handleBackgroundMessage);
 
+  // Loaded up front and injected, so providers that read stored settings can
+  // stay synchronous instead of every consumer handling a loading state.
+  final preferences = await SharedPreferences.getInstance();
+
   // ProviderScope is Riverpod's root; every provider the detection and alerts
   // features declare is resolved from here.
-  runApp(const ProviderScope(child: MainApp()));
+  runApp(
+    ProviderScope(
+      overrides: [sharedPreferencesProvider.overrideWithValue(preferences)],
+      child: const MainApp(),
+    ),
+  );
 }
 
 class MainApp extends StatelessWidget {
