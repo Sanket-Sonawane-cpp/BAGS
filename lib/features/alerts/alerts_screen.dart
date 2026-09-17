@@ -134,14 +134,12 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
             child: ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                _StatusTile(
-                  label: 'Server ($serverBaseUrl)',
-                  value: switch (_serverReachable) {
-                    null => 'checking...',
-                    true => 'reachable',
-                    false => 'unreachable',
+                _ServerField(
+                  reachable: _serverReachable,
+                  onChanged: () {
+                    setState(() => _serverReachable = null);
+                    _checkServer();
                   },
-                  ok: _serverReachable,
                 ),
                 _StatusTile(
                   label: 'Location permission',
@@ -224,6 +222,86 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
                   ),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Editable server address.
+///
+/// A text field rather than a build-time constant because a laptop's LAN IP
+/// changes with every DHCP lease, and rebuilding the app for each one wastes
+/// minutes that add up fast.
+class _ServerField extends ConsumerStatefulWidget {
+  const _ServerField({required this.reachable, required this.onChanged});
+
+  final bool? reachable;
+  final VoidCallback onChanged;
+
+  @override
+  ConsumerState<_ServerField> createState() => _ServerFieldState();
+}
+
+class _ServerFieldState extends ConsumerState<_ServerField> {
+  late final TextEditingController _controller = TextEditingController(
+    text: ref.read(serverUrlProvider),
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    FocusScope.of(context).unfocus();
+    await ref.read(serverUrlProvider.notifier).set(_controller.text);
+    widget.onChanged();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Icon(
+            switch (widget.reachable) {
+              null => Icons.hourglass_empty,
+              true => Icons.check_circle,
+              false => Icons.error,
+            },
+            color: switch (widget.reachable) {
+              null => Colors.grey,
+              true => Colors.green,
+              false => Colors.red,
+            },
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: TextField(
+              controller: _controller,
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'Server',
+                isDense: true,
+                helperText: switch (widget.reachable) {
+                  null => 'checking...',
+                  true => 'reachable',
+                  false => 'unreachable',
+                },
+              ),
+              onSubmitted: (_) => _save(),
+            ),
+          ),
+          IconButton(
+            onPressed: _save,
+            icon: const Icon(Icons.save),
+            tooltip: 'Save and retest',
           ),
         ],
       ),

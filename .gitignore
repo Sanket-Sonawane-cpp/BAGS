@@ -52,3 +52,7 @@ firebase-debug.*.log
 
 # Widget Preview related
 .widget_preview/
+
+# Firebase service account key - a real credential, never commit
+tools/serviceAccountKey.json
+**/serviceAccountKey.json
