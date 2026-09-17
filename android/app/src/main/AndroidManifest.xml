@@ -1,4 +1,24 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Live dashcam feed for on-device obstruction detection. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+
+    <!-- Tags each detection with a position, and reports our own position so the
+         server knows which cars are near a reported obstruction. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+
+    <!-- Talking to the alert server. Flutter injects this into debug/profile
+         builds automatically, but release builds need it declared here. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- Android 13+ requires this before FCM alerts can be shown. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- A camera is central to this app, but declared non-required so the build
+         still installs on camera-less devices for UI/networking work. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
+
     <application
         android:label="bags"
         android:name="${applicationName}"

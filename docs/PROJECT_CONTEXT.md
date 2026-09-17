@@ -61,6 +61,17 @@ AlertEvent { type, confidence, lat, lng, timestamp, ...whatever the server adds 
 ```
 This is the interface between our two halves — everything else can be built independently once it's agreed.
 
+## Toolchain — match these exactly
+
+```
+Flutter 3.47.2 • channel stable • revision d3b14c8769
+Dart 3.13.2
+```
+
+Everyone on the team should be on **Flutter 3.47.2 (stable)**. Check with `flutter --version`; if you're on something else, use `flutter downgrade` or install the matching version rather than working on a different one.
+
+**Don't run `flutter upgrade` casually during the project.** The build currently emits a warning that `firebase_core` applies its own Kotlin Gradle Plugin, and that *future* Flutter versions will reject this (see gotchas below). It's harmless today, but an unplanned upgrade could turn it into a hard build failure. If we do upgrade, do it deliberately and early — never near a milestone — and verify the Android build before anyone else pulls.
+
 ## Current status
 - ✅ GitHub repo created, Flutter project initialized in-place (`flutter create --empty --project-name ...`)
 - ✅ Dependencies added to `pubspec.yaml`: `camera`, `tflite_flutter`, `geolocator`, `http`, `firebase_core`, `firebase_messaging`, `google_maps_flutter`, `flutter_riverpod`
@@ -82,7 +93,10 @@ Note it uses `tasks.withType(...).configureEach` rather than `afterEvaluate`, be
 **`:app:packageDebug` fails with a missing `app-metadata.properties`**
 Stale intermediates left behind by an earlier failed build. Fix: `flutter clean`, then rebuild.
 
-**Harmless warnings you can ignore:** the KGP deprecation notice about `firebase_core` (a future-Flutter heads-up, not a current failure) and "source value 8 is obsolete" from a plugin's own config.
+**"Your app uses the following plugins that apply Kotlin Gradle Plugin (KGP): firebase_core"**
+Harmless on Flutter 3.47.2 — the build completes. Flutter is migrating to "Built-in Kotlin," where Flutter's Gradle plugin manages Kotlin compilation itself, and plugins applying their own KGP conflict with that model (the same root cause as the JVM-target problem above: each plugin bringing its own KGP with its own settings). The fix has to come from `firebase_core`'s maintainers, not us — there's nothing to change on our side. This is the main reason to stay pinned to 3.47.2 rather than upgrading mid-project.
+
+**"source value 8 is obsolete"** — comes from a plugin's own config, not ours. Ignore.
 
 ## Next steps, in order
 1. Both: write `DetectionEvent`/`AlertEvent` in `lib/core/models/` together (folders already exist)
