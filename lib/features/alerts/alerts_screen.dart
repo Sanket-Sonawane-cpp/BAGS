@@ -9,6 +9,7 @@ import '../../core/models/alert_event.dart';
 import '../../core/models/detection_event.dart';
 import '../../core/providers.dart';
 import '../../core/services/location_service.dart';
+import '../detection/detection_screen.dart';
 import 'alert_banner.dart';
 
 /// Working screen for the alerts half of the app.
@@ -122,7 +123,18 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
     final token = ref.watch(fcmTokenProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Alerts')),
+      appBar: AppBar(
+        title: const Text('Alerts'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.camera_alt_outlined),
+            tooltip: 'Detection (Member A)',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const DetectionScreen()),
+            ),
+          ),
+        ],
+      ),
       body: Column(
         children: [
           if (_banner != null)
