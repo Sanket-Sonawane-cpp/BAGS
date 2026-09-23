@@ -1,10 +1,12 @@
-import 'dart:math';
+import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 import 'models/alert_event.dart';
 import 'services/api_service.dart';
+import 'services/location_pinger.dart';
 import 'services/location_service.dart';
 import 'services/notification_service.dart';
 import 'services/trip_reporter.dart';
@@ -53,29 +55,30 @@ class ServerUrl extends Notifier<String> {
 
 final serverUrlProvider = NotifierProvider<ServerUrl, String>(ServerUrl.new);
 
-/// Stable identifier for this car, generated once and kept thereafter.
-///
-/// The FCM token cannot serve this purpose: it rotates on reinstall and
-/// occasionally on its own, and the server needs a handle that survives that
-/// so a car's location history stays attached to one identity.
-final carIdProvider = Provider<String>((ref) {
-  const key = 'car_id';
-  final preferences = ref.watch(sharedPreferencesProvider);
+/// Identifies this phone to the server across restarts, so a location ping
+/// updates the same server-side car record instead of creating a new one
+/// every launch. Generated once and persisted — not tied to any account
+/// system, since the app doesn't have one.
+class CarId extends Notifier<String> {
+  static const _key = 'car_id';
 
-  final existing = preferences.getString(key);
-  if (existing != null) return existing;
+  @override
+  String build() {
+    final prefs = ref.watch(sharedPreferencesProvider);
+    final existing = prefs.getString(_key);
+    if (existing != null) return existing;
 
-  final random = Random.secure();
-  final id = List.generate(
-    16,
-    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
-  ).join();
+    final generated = const Uuid().v4();
+    // Fire-and-forget: the id is already decided and usable this session
+    // regardless of whether the write below lands before it's read again;
+    // worst case a slow write just means one extra id generated on a crash
+    // before it landed, not a correctness problem.
+    unawaited(prefs.setString(_key, generated));
+    return generated;
+  }
+}
 
-  // Not awaited: the value is already returned, and a failed write only means
-  // a new id next launch.
-  preferences.setString(key, id);
-  return id;
-});
+final carIdProvider = NotifierProvider<CarId, String>(CarId.new);
 
 final locationServiceProvider = Provider<LocationService>(
   (ref) => const LocationService(),
@@ -136,6 +139,50 @@ final deviceRegistrationProvider = FutureProvider<void>((ref) async {
 final alertStreamProvider = StreamProvider<AlertEvent>(
   (ref) => ref.watch(notificationServiceProvider).alerts,
 );
+
+/// Fires whenever FCM reissues this device's token — see
+/// [NotificationService.tokenRefresh]. Wrapped as a provider (rather than
+/// [LocationPinger] subscribing to the raw stream directly) so
+/// [latestFcmTokenProvider] can combine it with [fcmTokenProvider] the same
+/// way the rest of this file combines streams and futures.
+final _tokenRefreshProvider = StreamProvider<String>(
+  (ref) => ref.watch(notificationServiceProvider).tokenRefresh,
+);
+
+/// The current FCM token, kept up to date after [fcmTokenProvider] resolves.
+///
+/// [fcmTokenProvider] only reflects the token as of app start; a
+/// [LocationPinger] tick needs whatever the token actually *is* right now,
+/// including a rotation that happened after launch (reinstall, restore, the
+/// occasional spontaneous rotation FCM does on its own).
+class LatestFcmToken extends Notifier<String?> {
+  @override
+  String? build() {
+    ref.listen(fcmTokenProvider, (_, next) {
+      final token = next.value;
+      if (token != null) state = token;
+    });
+    ref.listen(_tokenRefreshProvider, (_, next) {
+      final token = next.value;
+      if (token != null) state = token;
+    });
+    return null;
+  }
+}
+
+final latestFcmTokenProvider = NotifierProvider<LatestFcmToken, String?>(
+  LatestFcmToken.new,
+);
+
+final locationPingerProvider = Provider<LocationPinger>((ref) {
+  final pinger = LocationPinger(
+    apiService: ref.watch(apiServiceProvider),
+    locationService: ref.watch(locationServiceProvider),
+    carId: ref.watch(carIdProvider),
+  );
+  ref.onDispose(pinger.stop);
+  return pinger;
+});
 
 /// Every alert received this session, newest first.
 ///

@@ -9,6 +9,7 @@ import '../../core/models/alert_event.dart';
 import '../../core/models/detection_event.dart';
 import '../../core/providers.dart';
 import '../../core/services/location_service.dart';
+import '../detection/detection_screen.dart';
 import 'alert_banner.dart';
 
 /// Working screen for the alerts half of the app.
@@ -32,6 +33,7 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
   bool? _serverReachable;
   bool _tripRunning = false;
   String? _status;
+  bool _pingerStarted = false;
 
   @override
   void initState() {
@@ -57,6 +59,16 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
 
     setState(() => _access = access);
     if (access != LocationAccess.granted) return;
+
+    // Starts the periodic "here is where I am" ping to the server (see
+    // LocationPinger) — only once permission is actually granted, so it
+    // isn't failing every ~20s from launch until the user responds to the
+    // permission prompt. start() is a no-op if already running, so this is
+    // safe to reach again on a manual "Refresh GPS" tap.
+    ref
+        .read(locationPingerProvider)
+        .start(tokenProvider: () => ref.read(latestFcmTokenProvider));
+    if (mounted) setState(() => _pingerStarted = true);
 
     try {
       final position = await service.getCurrentPosition();
@@ -149,13 +161,25 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
     // Read so the provider stays alive and keeps accumulating history.
     final alerts = ref.watch(alertHistoryProvider);
     final token = ref.watch(fcmTokenProvider);
+    final carId = ref.watch(carIdProvider);
 
     // Watching this is what actually sends the token upstream; without it the
     // server has no way to address this phone.
     final registration = ref.watch(deviceRegistrationProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Alerts')),
+      appBar: AppBar(
+        title: const Text('Alerts'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.camera_alt_outlined),
+            tooltip: 'Detection (Member A)',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const DetectionScreen()),
+            ),
+          ),
+        ],
+      ),
       body: Column(
         children: [
           if (_banner != null)
@@ -186,6 +210,13 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
                       : '${_position!.latitude.toStringAsFixed(5)}, '
                           '${_position!.longitude.toStringAsFixed(5)}',
                   ok: _position != null,
+                ),
+                _StatusTile(
+                  label: 'Location ping',
+                  value: _pingerStarted
+                      ? 'sending every 20s as $carId'
+                      : 'not started — needs location permission',
+                  ok: _pingerStarted,
                 ),
                 _StatusTile(
                   label: 'FCM token',

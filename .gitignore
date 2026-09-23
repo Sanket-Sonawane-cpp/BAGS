@@ -56,3 +56,14 @@ firebase-debug.*.log
 # Firebase service account key - a real credential, never commit
 tools/serviceAccountKey.json
 **/serviceAccountKey.json
+
+# Raw ML weights (.onnx/.pt/...) from the ML pair: too large for git and not
+# something the app loads directly (tflite_flutter needs .tflite — see
+# tools/convert_to_tflite.py). Only the converted .tflite under
+# assets/models/ ships with the app.
+/ml/
+
+# server/app.py's local SQLite database — runtime data, not source. Delete
+# it (server stopped) or POST /reset to start clean instead of untracking it.
+server/bags.db
+
