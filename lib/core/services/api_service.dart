@@ -52,15 +52,23 @@ class ApiService {
 
   /// Reports where this car currently is, so the server knows to alert it about
   /// obstructions reported nearby.
+  ///
+  /// [fcmToken] rides along on the same ping rather than a separate
+  /// register-token call, so a token refresh reaches the server on the very
+  /// next periodic ping with no extra plumbing — see [LocationPinger]. Omit
+  /// it (leave null) only before the token is available yet, e.g. while FCM
+  /// permission is still being requested on first launch.
   Future<void> postLocation({
     required String carId,
     required double latitude,
     required double longitude,
+    String? fcmToken,
   }) async {
     await _post('/location', {
       'car_id': carId,
       'lat': latitude,
       'lng': longitude,
+      if (fcmToken != null) 'fcm_token': fcmToken,
     });
   }
 

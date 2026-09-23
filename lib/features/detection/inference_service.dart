@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
@@ -5,6 +6,14 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 
 import 'frame_preprocessor.dart';
 import 'yolo_decoder.dart';
+
+/// CPU threads the interpreter uses regardless of which delegate (if any)
+/// ends up handling the graph. 4 rather than tflite_flutter examples' usual
+/// 2: low-end octa-core chipsets (e.g. the Redmi Note 8's Snapdragon 665)
+/// have the headroom, and CPU-only is exactly the slow path this matters
+/// most for — the delegate fallback chain below means CPU often *is* what
+/// actually runs.
+const int _interpreterThreads = 4;
 
 /// Shape of the loaded model's output, detected from its output tensor's
 /// rank at load time rather than configured — see [InferenceService.load].
@@ -74,6 +83,11 @@ class InferenceService {
   IsolateInterpreter? _isolateInterpreter;
   final FramePreprocessor _preprocessor = const FramePreprocessor();
 
+  /// Set only if [_createInterpreter] ends up on the explicit GPU delegate
+  /// rung (rung 2) — owns native resources the interpreter doesn't take
+  /// ownership of, so it has to be deleted separately in [dispose].
+  Delegate? _delegate;
+
   late int _inputWidth;
   late int _inputHeight;
   late TensorType _inputType;
@@ -87,20 +101,8 @@ class InferenceService {
 
   bool get isLoaded => _isolateInterpreter != null;
 
-  /// Loads the model, preferring a hardware delegate for this platform but
-  /// falling back to CPU if the delegate rejects this model's op set.
-  ///
-  /// NNAPI (Android) and Metal (iOS) are tflite_flutter's built-in delegate
-  /// switches — the doc's "GPU/NNAPI/CoreML delegate on" requirement without
-  /// the manual pointer lifecycle a hand-created [GpuDelegateV2] or
-  /// [CoreMlDelegate] would add. The fallback matters in practice: on a
-  /// Redmi Note 8, NNAPI failed outright (not just slow) on the converted
-  /// YOLO graph — TFLite's C API fails interpreter *creation* rather than
-  /// silently falling back to CPU on its own, throwing an [ArgumentError]
-  /// (not an [Exception]) from native code once allocateTensors() runs.
-  /// Confirmed the model itself is fine: it loads and runs with plain
-  /// `tf.lite.Interpreter` (no delegate) in Python. Device/driver-dependent,
-  /// so always try the delegate first rather than disabling it outright.
+  /// Loads the model, trying progressively more conservative delegate
+  /// options until one actually works — see [_createInterpreter].
   Future<void> load() async {
     final interpreter = await _createInterpreter();
     _interpreter = interpreter;
@@ -129,27 +131,67 @@ class InferenceService {
     );
   }
 
+  /// Three rungs, each tried only if the previous one failed to even create
+  /// an interpreter (not just "ran slow") — see [_tryCreate]'s doc comment
+  /// for why that's a real failure mode here, not a hypothetical one:
+  ///
+  /// 1. NNAPI (Android) / Metal (iOS) — tflite_flutter's built-in delegate
+  ///    switches, no manual pointer lifecycle needed. The doc's "GPU/NNAPI/
+  ///    CoreML delegate on" requirement, cheapest to try.
+  /// 2. Android's GPU delegate ([GpuDelegateV2]), tried explicitly — a
+  ///    different native code path than NNAPI. NNAPI routes through the
+  ///    device's HAL and can reject ops its vendor driver doesn't support
+  ///    (confirmed: what failed on a Redmi Note 8 against this converted
+  ///    YOLO graph); the GPU delegate runs its own OpenGL/OpenCL compute
+  ///    shaders and often has different — sometimes better — coverage for
+  ///    conv-heavy nets. Unproven on this specific model/device; if it also
+  ///    fails to create, rung 3 still catches it.
+  /// 3. CPU only, [_interpreterThreads] threads — always works, just the
+  ///    slowest. What actually ran on the Redmi Note 8 before this existed.
   Future<Interpreter> _createInterpreter() async {
-    try {
-      return await Interpreter.fromAsset(
-        modelAsset,
-        options: InterpreterOptions()
-          ..threads = 2
-          ..useNnApiForAndroid = true
-          ..useMetalDelegateForIOS = true,
+    final nnapiOrMetal = await _tryCreate(
+      InterpreterOptions()
+        ..threads = _interpreterThreads
+        ..useNnApiForAndroid = true
+        ..useMetalDelegateForIOS = true,
+    );
+    if (nnapiOrMetal != null) return nnapiOrMetal;
+
+    if (Platform.isAndroid) {
+      final delegate = GpuDelegateV2();
+      final gpu = await _tryCreate(
+        InterpreterOptions()
+          ..threads = _interpreterThreads
+          ..addDelegate(delegate),
       );
-    } catch (error) {
-      // Deliberately broad: the native failure mode here is an
-      // ArgumentError (an Error, not an Exception) from quiver's
-      // checkArgument, thrown well below any Dart try/catch the delegate
-      // itself might have — see load()'s doc comment.
-      // ignore: avoid_catches_without_on_clauses
+      if (gpu != null) {
+        _delegate = delegate; // kept alive for dispose() to delete later
+        return gpu;
+      }
+      delegate.delete(); // this rung failed — nothing left holding it
     }
 
     return Interpreter.fromAsset(
       modelAsset,
-      options: InterpreterOptions()..threads = 2,
+      options: InterpreterOptions()..threads = _interpreterThreads,
     );
+  }
+
+  /// Null on failure rather than rethrowing, so [_createInterpreter] can
+  /// fall through to the next rung.
+  ///
+  /// Deliberately catches everything, not `on Exception`: the native
+  /// failure mode when a delegate rejects a model's op set is an
+  /// [ArgumentError] (an [Error], not an [Exception]) from quiver's
+  /// checkArgument, thrown well below any typed Dart catch — confirmed by
+  /// an actual crash log, not a hypothetical.
+  Future<Interpreter?> _tryCreate(InterpreterOptions options) async {
+    try {
+      return await Interpreter.fromAsset(modelAsset, options: options);
+      // ignore: avoid_catches_without_on_clauses
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Runs the model on one camera frame.
@@ -319,7 +361,9 @@ class InferenceService {
   Future<void> dispose() async {
     await _isolateInterpreter?.close();
     _interpreter?.close();
+    _delegate?.delete(); // only set if _createInterpreter used the GPU rung
     _isolateInterpreter = null;
     _interpreter = null;
+    _delegate = null;
   }
 }

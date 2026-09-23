@@ -32,6 +32,7 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
   LocationAccess? _access;
   bool? _serverReachable;
   String? _status;
+  bool _pingerStarted = false;
 
   @override
   void initState() {
@@ -57,6 +58,16 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
 
     setState(() => _access = access);
     if (access != LocationAccess.granted) return;
+
+    // Starts the periodic "here is where I am" ping to the server (see
+    // LocationPinger) — only once permission is actually granted, so it
+    // isn't failing every ~20s from launch until the user responds to the
+    // permission prompt. start() is a no-op if already running, so this is
+    // safe to reach again on a manual "Refresh GPS" tap.
+    ref
+        .read(locationPingerProvider)
+        .start(tokenProvider: () => ref.read(latestFcmTokenProvider));
+    if (mounted) setState(() => _pingerStarted = true);
 
     try {
       final position = await service.getCurrentPosition();
@@ -121,6 +132,7 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
     // Read so the provider stays alive and keeps accumulating history.
     final alerts = ref.watch(alertHistoryProvider);
     final token = ref.watch(fcmTokenProvider);
+    final carId = ref.watch(carIdProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -165,6 +177,13 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
                       : '${_position!.latitude.toStringAsFixed(5)}, '
                           '${_position!.longitude.toStringAsFixed(5)}',
                   ok: _position != null,
+                ),
+                _StatusTile(
+                  label: 'Location ping',
+                  value: _pingerStarted
+                      ? 'sending every 20s as $carId'
+                      : 'not started — needs location permission',
+                  ok: _pingerStarted,
                 ),
                 _StatusTile(
                   label: 'FCM token',

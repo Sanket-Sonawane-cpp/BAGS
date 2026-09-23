@@ -63,3 +63,7 @@ tools/serviceAccountKey.json
 # assets/models/ ships with the app.
 /ml/
 
+# server/app.py's local SQLite database — runtime data, not source. Delete
+# it (server stopped) or POST /reset to start clean instead of untracking it.
+server/bags.db
+

@@ -17,9 +17,18 @@ class CameraService {
   /// Finds the rear camera and opens it.
   ///
   /// Resolution is deliberately modest: [FramePreprocessor] downscales every
-  /// frame to the model's input size anyway (224x224-ish), so a high-res
-  /// capture would only cost battery and conversion time. `medium` (~720p)
-  /// is still sharp enough for the preview widget.
+  /// frame to the model's input size anyway (640x640 for the current
+  /// obstruction detector), so a high-res capture only costs battery and
+  /// conversion time. `low` (~320x240 on most Android devices) rather than
+  /// `medium` (~640x480): [FramePreprocessor]'s NV21→RGB step is a
+  /// per-pixel Dart loop with no hardware acceleration, so it scales
+  /// directly with capture resolution — `low` is 4x fewer pixels for it to
+  /// touch per frame. Trade-off: `low` means real upscaling to the model's
+  /// 640x640 (some detail genuinely lost), not just less waste, so revisit
+  /// this if detection accuracy on real obstructions looks worse than the
+  /// model warrants — that's a sign to move back to `medium` and look
+  /// elsewhere for the time instead (quantizing the model matters far more
+  /// than this either way, see docs/PROJECT_CONTEXT.md).
   Future<CameraController> initialise() async {
     final cameras = await availableCameras();
     if (cameras.isEmpty) {
@@ -33,7 +42,7 @@ class CameraService {
 
     final controller = CameraController(
       camera,
-      ResolutionPreset.medium,
+      ResolutionPreset.low,
       enableAudio: false,
       // bgra8888 (iOS) and nv21 (Android) are the two formats
       // FramePreprocessor knows how to decode. yuv420's per-platform plane
