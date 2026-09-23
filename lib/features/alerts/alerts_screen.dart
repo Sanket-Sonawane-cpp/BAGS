@@ -31,6 +31,7 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
   Position? _position;
   LocationAccess? _access;
   bool? _serverReachable;
+  bool _tripRunning = false;
   String? _status;
   bool _pingerStarted = false;
 
@@ -80,6 +81,34 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
   Future<void> _checkServer() async {
     final reachable = await ref.read(apiServiceProvider).isReachable();
     if (mounted) setState(() => _serverReachable = reachable);
+  }
+
+  /// Starts or stops reporting this car's position to the server.
+  ///
+  /// Nothing can alert this car until it is doing this: the server only warns
+  /// cars whose position it knows.
+  Future<void> _toggleTrip() async {
+    final reporter = ref.read(tripReporterProvider);
+
+    if (_tripRunning) {
+      await reporter.stop();
+      if (mounted) {
+        setState(() {
+          _tripRunning = false;
+          _status = 'Trip stopped';
+        });
+      }
+      return;
+    }
+
+    final started = await reporter.start();
+    if (!mounted) return;
+    setState(() {
+      _tripRunning = started;
+      _status = started
+          ? 'Trip started - reporting position'
+          : 'Cannot start: location permission needed';
+    });
   }
 
   /// Sends a fake detection at the current position.
@@ -133,6 +162,10 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
     final alerts = ref.watch(alertHistoryProvider);
     final token = ref.watch(fcmTokenProvider);
     final carId = ref.watch(carIdProvider);
+
+    // Watching this is what actually sends the token upstream; without it the
+    // server has no way to address this phone.
+    final registration = ref.watch(deviceRegistrationProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -207,6 +240,26 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
                           }
                         },
                 ),
+                _StatusTile(
+                  label: 'Registered with server',
+                  value: registration.when(
+                    loading: () => 'registering...',
+                    error: (error, _) => '$error',
+                    data: (_) => 'server can push to this car',
+                  ),
+                  ok: switch (registration) {
+                    AsyncLoading() => null,
+                    AsyncError() => false,
+                    _ => true,
+                  },
+                ),
+                _StatusTile(
+                  label: 'Trip',
+                  value: _tripRunning
+                      ? 'reporting position every 20s'
+                      : 'not started - server cannot alert this car',
+                  ok: _tripRunning,
+                ),
                 const SizedBox(height: 8),
                 Wrap(
                   spacing: 8,
@@ -222,6 +275,10 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
                     FilledButton.tonal(
                       onPressed: _sendTestDetection,
                       child: const Text('Send test detection'),
+                    ),
+                    FilledButton.tonal(
+                      onPressed: _toggleTrip,
+                      child: Text(_tripRunning ? 'Stop trip' : 'Start trip'),
                     ),
                   ],
                 ),

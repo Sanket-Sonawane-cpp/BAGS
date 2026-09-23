@@ -9,6 +9,7 @@ import 'services/api_service.dart';
 import 'services/location_pinger.dart';
 import 'services/location_service.dart';
 import 'services/notification_service.dart';
+import 'services/trip_reporter.dart';
 
 /// Fallback server address, used the first time the app runs.
 ///
@@ -104,6 +105,35 @@ final notificationServiceProvider = Provider<NotificationService>((ref) {
 final fcmTokenProvider = FutureProvider<String?>(
   (ref) => ref.watch(notificationServiceProvider).initialise(),
 );
+
+final tripReporterProvider = Provider<TripReporter>((ref) {
+  final reporter = TripReporter(
+    api: ref.watch(apiServiceProvider),
+    location: ref.watch(locationServiceProvider),
+    carId: ref.watch(carIdProvider),
+  );
+  ref.onDispose(reporter.dispose);
+  return reporter;
+});
+
+/// Registers this device for pushes, and re-registers whenever FCM rotates the
+/// token.
+///
+/// A stale token on the server is silent: pushes are accepted and dropped, so
+/// nothing surfaces as an error until someone notices alerts stopped arriving.
+final deviceRegistrationProvider = FutureProvider<void>((ref) async {
+  final token = await ref.watch(fcmTokenProvider.future);
+  if (token == null) return;
+
+  final reporter = ref.watch(tripReporterProvider);
+  await reporter.register(token);
+
+  final subscription = ref
+      .watch(notificationServiceProvider)
+      .tokenRefresh
+      .listen(reporter.register);
+  ref.onDispose(subscription.cancel);
+});
 
 /// Alerts as they arrive from the server.
 final alertStreamProvider = StreamProvider<AlertEvent>(
