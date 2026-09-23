@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -5,6 +7,7 @@ import 'models/alert_event.dart';
 import 'services/api_service.dart';
 import 'services/location_service.dart';
 import 'services/notification_service.dart';
+import 'services/trip_reporter.dart';
 
 /// Fallback server address, used the first time the app runs.
 ///
@@ -50,6 +53,30 @@ class ServerUrl extends Notifier<String> {
 
 final serverUrlProvider = NotifierProvider<ServerUrl, String>(ServerUrl.new);
 
+/// Stable identifier for this car, generated once and kept thereafter.
+///
+/// The FCM token cannot serve this purpose: it rotates on reinstall and
+/// occasionally on its own, and the server needs a handle that survives that
+/// so a car's location history stays attached to one identity.
+final carIdProvider = Provider<String>((ref) {
+  const key = 'car_id';
+  final preferences = ref.watch(sharedPreferencesProvider);
+
+  final existing = preferences.getString(key);
+  if (existing != null) return existing;
+
+  final random = Random.secure();
+  final id = List.generate(
+    16,
+    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
+
+  // Not awaited: the value is already returned, and a failed write only means
+  // a new id next launch.
+  preferences.setString(key, id);
+  return id;
+});
+
 final locationServiceProvider = Provider<LocationService>(
   (ref) => const LocationService(),
 );
@@ -75,6 +102,35 @@ final notificationServiceProvider = Provider<NotificationService>((ref) {
 final fcmTokenProvider = FutureProvider<String?>(
   (ref) => ref.watch(notificationServiceProvider).initialise(),
 );
+
+final tripReporterProvider = Provider<TripReporter>((ref) {
+  final reporter = TripReporter(
+    api: ref.watch(apiServiceProvider),
+    location: ref.watch(locationServiceProvider),
+    carId: ref.watch(carIdProvider),
+  );
+  ref.onDispose(reporter.dispose);
+  return reporter;
+});
+
+/// Registers this device for pushes, and re-registers whenever FCM rotates the
+/// token.
+///
+/// A stale token on the server is silent: pushes are accepted and dropped, so
+/// nothing surfaces as an error until someone notices alerts stopped arriving.
+final deviceRegistrationProvider = FutureProvider<void>((ref) async {
+  final token = await ref.watch(fcmTokenProvider.future);
+  if (token == null) return;
+
+  final reporter = ref.watch(tripReporterProvider);
+  await reporter.register(token);
+
+  final subscription = ref
+      .watch(notificationServiceProvider)
+      .tokenRefresh
+      .listen(reporter.register);
+  ref.onDispose(subscription.cancel);
+});
 
 /// Alerts as they arrive from the server.
 final alertStreamProvider = StreamProvider<AlertEvent>(

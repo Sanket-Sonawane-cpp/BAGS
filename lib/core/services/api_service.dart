@@ -50,6 +50,18 @@ class ApiService {
     return (jsonDecode(response) as Map<String, dynamic>)['id'].toString();
   }
 
+  /// Tells the server how to reach this car with a push.
+  ///
+  /// Must be called again whenever FCM reissues the token, otherwise the server
+  /// keeps pushing to a dead address and alerts simply stop arriving with no
+  /// visible error anywhere.
+  Future<void> registerDevice({
+    required String carId,
+    required String fcmToken,
+  }) async {
+    await _post('/register', {'car_id': carId, 'fcm_token': fcmToken});
+  }
+
   /// Reports where this car currently is, so the server knows to alert it about
   /// obstructions reported nearby.
   Future<void> postLocation({
