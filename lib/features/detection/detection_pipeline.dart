@@ -15,6 +15,17 @@ import 'inference_service.dart';
 /// frame, since its output is meaningless noise until it's swapped out.
 const double _defaultConfidenceThreshold = 0.5;
 
+/// What one processed frame produced, and how long the model took on it.
+class FrameResult {
+  const FrameResult({required this.result, required this.elapsed});
+
+  /// The model's best guess, or null when it saw nothing worth reporting.
+  final ClassificationResult? result;
+
+  /// Preprocessing + inference + parsing for this frame.
+  final Duration elapsed;
+}
+
 /// Runs the camera → model → [DetectionEvent] pipeline end to end.
 ///
 /// This is Member A's half of the app's one shared contract (see
@@ -74,13 +85,12 @@ class DetectionPipeline {
   /// something other than background, tagged with the current GPS fix.
   Stream<DetectionEvent> get detections => _detections.stream;
 
-  final StreamController<ClassificationResult> _rawResults =
-      StreamController<ClassificationResult>.broadcast();
+  final StreamController<FrameResult> _rawResults =
+      StreamController<FrameResult>.broadcast();
 
-  /// Every processed frame's raw result, background included — lets the dev
-  /// screen show inference is actually running even while the placeholder
-  /// model's output is meaningless noise.
-  Stream<ClassificationResult> get rawResults => _rawResults.stream;
+  /// Every processed frame, including ones where nothing was seen — lets the
+  /// UI show inference is running and how fast.
+  Stream<FrameResult> get rawResults => _rawResults.stream;
 
   CameraController? get cameraController => _cameraController;
 
@@ -124,11 +134,16 @@ class DetectionPipeline {
 
   Future<void> _process(CameraImage frame) async {
     try {
+      final stopwatch = Stopwatch()..start();
       final result = await inferenceService.run(frame);
+      if (!_rawResults.isClosed) {
+        _rawResults.add(
+          FrameResult(result: result, elapsed: stopwatch.elapsed),
+        );
+      }
       // A detector reports null when nothing on this frame cleared its own
-      // (lower, pre-NMS) score threshold — nothing to show or gate here.
+      // (lower, pre-NMS) score threshold — nothing to gate here.
       if (result == null) return;
-      if (!_rawResults.isClosed) _rawResults.add(result);
 
       // Only a classifier has this convention; a detector's "nothing found"
       // is already handled by the null check above.

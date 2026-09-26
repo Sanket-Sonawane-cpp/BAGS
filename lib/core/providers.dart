@@ -79,8 +79,39 @@ class CarId extends Notifier<String> {
 
 final carIdProvider = NotifierProvider<CarId, String>(CarId.new);
 
+/// Whether this phone's own detections are posted to the server, so other
+/// cars get alerted about them. On by default — that's the app's purpose —
+/// and remembered, so turning it off for a test drive sticks.
+class ReportDetections extends Notifier<bool> {
+  static const _key = 'report_detections';
+
+  @override
+  bool build() => ref.watch(sharedPreferencesProvider).getBool(_key) ?? true;
+
+  Future<void> set(bool value) async {
+    await ref.read(sharedPreferencesProvider).setBool(_key, value);
+    state = value;
+  }
+}
+
+final reportDetectionsProvider = NotifierProvider<ReportDetections, bool>(
+  ReportDetections.new,
+);
+
 final locationServiceProvider = Provider<LocationService>(
   (ref) => const LocationService(),
+);
+
+/// Location permission, asked for once at startup. `ref.invalidate` it to
+/// ask again (e.g. after the user returns from system settings).
+final locationAccessProvider = FutureProvider<LocationAccess>(
+  (ref) => ref.watch(locationServiceProvider).ensurePermission(),
+);
+
+/// Whether the server answers its health check. Re-runs by itself when the
+/// server address changes; `ref.invalidate` it to re-check on demand.
+final serverReachableProvider = FutureProvider<bool>(
+  (ref) => ref.watch(apiServiceProvider).isReachable(),
 );
 
 final apiServiceProvider = Provider<ApiService>((ref) {
@@ -136,7 +167,9 @@ class LatestFcmToken extends Notifier<String?> {
       final token = next.value;
       if (token != null) state = token;
     });
-    return null;
+    // The listeners above only see changes; start from whatever FCM already
+    // has, in case the token resolved before this provider was first read.
+    return ref.read(fcmTokenProvider).value;
   }
 }
 

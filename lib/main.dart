@@ -5,9 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app/home_shell.dart';
+import 'app/theme.dart';
 import 'core/providers.dart';
 import 'core/services/notification_service.dart';
-import 'features/alerts/alerts_screen.dart';
 import 'firebase_options.dart';
 
 Future<void> main() async {
@@ -44,11 +45,10 @@ class MainApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Bags',
-      theme: ThemeData(
-        colorSchemeSeed: const Color(0xFFB3261E),
-        useMaterial3: true,
-      ),
-      home: const AlertsScreen(),
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
+      home: const HomeShell(),
     );
   }
 }

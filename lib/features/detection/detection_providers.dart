@@ -10,8 +10,8 @@ import 'inference_service.dart';
 /// so a retrained drop-in only needs the two constants below kept in sync
 /// with its `ml/hazard_detector.metadata.json`.
 ///
-/// ~7-8x faster than the YOLO11m it replaced (`obstruction_detector.tflite`)
-/// on the same CPU. Still float32 — an int8 build would be faster again.
+/// ~7-8x faster than the YOLO11m it replaced (now `ml/obstruction_detector
+/// .tflite`, out of the app bundle) on the same CPU. Still float32 — an int8 build would be faster again.
 const String modelAsset = 'assets/models/hazard_detector.tflite';
 
 /// Class order exactly as in the model's metadata (`classes`) — keep in sync
@@ -64,10 +64,23 @@ final detectionStreamProvider = StreamProvider<DetectionEvent>((ref) {
   return ref.watch(detectionPipelineProvider).detections;
 });
 
-/// Every processed frame's raw classification, background included — lets
-/// the dev screen show inference is actually running frame to frame, not
-/// just when a detection clears the confidence threshold.
-final rawInferenceStreamProvider = StreamProvider<ClassificationResult>((ref) {
+/// Whether the camera → model loop is running. Kept here rather than read
+/// off [DetectionPipeline.isRunning] so widgets rebuild when it changes —
+/// e.g. the tab bar's "detecting" dot while another tab is showing.
+class DetectionRunning extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void set(bool running) => state = running;
+}
+
+final detectionRunningProvider = NotifierProvider<DetectionRunning, bool>(
+  DetectionRunning.new,
+);
+
+/// Every processed frame, background and empty frames included — drives the
+/// live overlay and the per-frame timing readout.
+final rawInferenceStreamProvider = StreamProvider<FrameResult>((ref) {
   return ref.watch(detectionPipelineProvider).rawResults;
 });
 

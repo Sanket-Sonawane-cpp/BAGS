@@ -1,23 +1,15 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:geolocator/geolocator.dart';
 
-import '../../core/models/alert_event.dart';
-import '../../core/models/detection_event.dart';
+import '../../core/hazards.dart';
 import '../../core/providers.dart';
-import '../../core/services/location_service.dart';
-import '../detection/detection_screen.dart';
-import '../navigation/navigation_screen.dart';
-import 'alert_banner.dart';
+import '../detection/detection_providers.dart';
+import '../settings/settings_screen.dart';
 
-/// Working screen for the alerts half of the app.
-///
-/// This is a development surface, not the final driving UI: it surfaces the
-/// FCM token, server reachability and GPS state so each piece can be verified
-/// independently before the detection pipeline exists to drive it.
+enum _Feed { nearby, mine }
+
+/// History for this session: hazards other cars reported near this one, and
+/// hazards this phone spotted itself.
 class AlertsScreen extends ConsumerStatefulWidget {
   const AlertsScreen({super.key});
 
@@ -26,321 +18,84 @@ class AlertsScreen extends ConsumerStatefulWidget {
 }
 
 class _AlertsScreenState extends ConsumerState<AlertsScreen> {
-  AlertEvent? _banner;
-  Timer? _bannerTimer;
-
-  Position? _position;
-  LocationAccess? _access;
-  bool? _serverReachable;
-  String? _status;
-  bool _pingerStarted = false;
-
-  @override
-  void initState() {
-    super.initState();
-    // Deferred because these touch providers, which cannot be read while the
-    // widget is still being constructed.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _refreshLocation();
-      _checkServer();
-    });
-  }
-
-  @override
-  void dispose() {
-    _bannerTimer?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _refreshLocation() async {
-    final service = ref.read(locationServiceProvider);
-    final access = await service.ensurePermission();
-    if (!mounted) return;
-
-    setState(() => _access = access);
-    if (access != LocationAccess.granted) return;
-
-    // Starts the periodic "here is where I am" ping to the server (see
-    // LocationPinger) — only once permission is actually granted, so it
-    // isn't failing every ~20s from launch until the user responds to the
-    // permission prompt. start() is a no-op if already running, so this is
-    // safe to reach again on a manual "Refresh GPS" tap.
-    ref
-        .read(locationPingerProvider)
-        .start(tokenProvider: () => ref.read(latestFcmTokenProvider));
-    if (mounted) setState(() => _pingerStarted = true);
-
-    try {
-      final position = await service.getCurrentPosition();
-      if (mounted) setState(() => _position = position);
-    } on Exception catch (error) {
-      if (mounted) setState(() => _status = 'Location failed: $error');
-    }
-  }
-
-  Future<void> _checkServer() async {
-    final reachable = await ref.read(apiServiceProvider).isReachable();
-    if (mounted) setState(() => _serverReachable = reachable);
-  }
-
-  /// Sends a fake detection at the current position.
-  ///
-  /// Lets the whole upload path be exercised before Member A's camera pipeline
-  /// exists to produce real ones.
-  Future<void> _sendTestDetection() async {
-    final position = _position;
-    if (position == null) {
-      setState(() => _status = 'Need a GPS fix first');
-      return;
-    }
-
-    setState(() => _status = 'Sending...');
-    try {
-      final id = await ref.read(apiServiceProvider).postDetection(
-        DetectionEvent(
-          type: 'pothole',
-          confidence: 0.9,
-          latitude: position.latitude,
-          longitude: position.longitude,
-          timestamp: DateTime.now().toUtc(),
-        ),
-      );
-      if (mounted) setState(() => _status = 'Server accepted it as $id');
-    } on Exception catch (error) {
-      if (mounted) setState(() => _status = '$error');
-    }
-  }
-
-  void _showBanner(AlertEvent alert) {
-    // A driver is not looking at the screen when this fires, so the alert has
-    // to announce itself physically as well as visually.
-    HapticFeedback.heavyImpact();
-
-    setState(() => _banner = alert);
-    _bannerTimer?.cancel();
-    _bannerTimer = Timer(const Duration(seconds: 8), () {
-      if (mounted) setState(() => _banner = null);
-    });
-  }
+  _Feed _feed = _Feed.nearby;
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(alertStreamProvider, (_, next) {
-      final alert = next.value;
-      if (alert != null) _showBanner(alert);
-    });
-
-    // Read so the provider stays alive and keeps accumulating history.
     final alerts = ref.watch(alertHistoryProvider);
-    final token = ref.watch(fcmTokenProvider);
-    final carId = ref.watch(carIdProvider);
+    final detections = ref.watch(detectionHistoryProvider);
+
+    final items = _feed == _Feed.nearby
+        ? [
+            for (final a in alerts)
+              _Item(
+                type: a.type,
+                detail: '${formatDistance(a.distanceMeters)} away',
+                time: a.timestamp,
+              ),
+          ]
+        : [
+            for (final d in detections)
+              _Item(
+                type: d.type,
+                detail: '${(d.confidence * 100).round()}% confident',
+                time: d.timestamp,
+              ),
+          ];
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Alerts'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.map_outlined),
-            tooltip: 'Navigate',
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const NavigationScreen()),
+          if (items.isNotEmpty)
+            IconButton(
+              onPressed: () => _feed == _Feed.nearby
+                  ? ref.read(alertHistoryProvider.notifier).clear()
+                  : ref.read(detectionHistoryProvider.notifier).clear(),
+              icon: const Icon(Icons.delete_sweep_outlined),
+              tooltip: 'Clear',
             ),
-          ),
           IconButton(
-            icon: const Icon(Icons.camera_alt_outlined),
-            tooltip: 'Detection (Member A)',
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const DetectionScreen()),
-            ),
+            onPressed: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute(builder: (_) => const SettingsScreen())),
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: 'Settings',
           ),
         ],
       ),
       body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_banner != null)
-            AlertBanner(
-              alert: _banner!,
-              onDismiss: () => setState(() => _banner = null),
-            ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _ServerField(
-                  reachable: _serverReachable,
-                  onChanged: () {
-                    setState(() => _serverReachable = null);
-                    _checkServer();
-                  },
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: SegmentedButton<_Feed>(
+              segments: [
+                ButtonSegment(
+                  value: _Feed.nearby,
+                  icon: const Icon(Icons.cell_tower),
+                  label: Text('Nearby (${alerts.length})'),
                 ),
-                _StatusTile(
-                  label: 'Location permission',
-                  value: _access?.name ?? 'checking...',
-                  ok: _access == null ? null : _access == LocationAccess.granted,
+                ButtonSegment(
+                  value: _Feed.mine,
+                  icon: const Icon(Icons.videocam_outlined),
+                  label: Text('Spotted by me (${detections.length})'),
                 ),
-                _StatusTile(
-                  label: 'Position',
-                  value: _position == null
-                      ? 'no fix'
-                      : '${_position!.latitude.toStringAsFixed(5)}, '
-                          '${_position!.longitude.toStringAsFixed(5)}',
-                  ok: _position != null,
-                ),
-                _StatusTile(
-                  label: 'Location ping',
-                  value: _pingerStarted
-                      ? 'sending every 20s as $carId'
-                      : 'not started — needs location permission',
-                  ok: _pingerStarted,
-                ),
-                _StatusTile(
-                  label: 'FCM token',
-                  value: token.when(
-                    loading: () => 'requesting...',
-                    error: (error, _) => '$error',
-                    data: (value) => value ?? 'permission refused',
-                  ),
-                  ok: token.value != null,
-                  // Needed to target a test push from the Firebase console.
-                  onTap: token.value == null
-                      ? null
-                      : () async {
-                          await Clipboard.setData(
-                            ClipboardData(text: token.value!),
-                          );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Token copied')),
-                            );
-                          }
-                        },
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    FilledButton(
-                      onPressed: _refreshLocation,
-                      child: const Text('Refresh GPS'),
-                    ),
-                    FilledButton.tonal(
-                      onPressed: _checkServer,
-                      child: const Text('Ping server'),
-                    ),
-                    FilledButton.tonal(
-                      onPressed: _sendTestDetection,
-                      child: const Text('Send test detection'),
-                    ),
-                  ],
-                ),
-                if (_status != null) ...[
-                  const SizedBox(height: 12),
-                  Text(_status!, style: const TextStyle(color: Colors.blueGrey)),
-                ],
-                const Divider(height: 32),
-                Text(
-                  'Alerts received (${alerts.length})',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 8),
-                if (alerts.isEmpty)
-                  const Text(
-                    'None yet. Send a test push from the Firebase console, '
-                    'targeting the token above.',
-                    style: TextStyle(color: Colors.grey),
-                  ),
-                for (final alert in alerts)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.warning_amber_rounded),
-                    title: Text(alert.type),
-                    subtitle: Text(
-                      '${formatDistance(alert.distanceMeters)} · '
-                      '${alert.timestamp.toLocal()}',
-                    ),
-                  ),
               ],
+              selected: {_feed},
+              showSelectedIcon: false,
+              onSelectionChanged: (s) => setState(() => _feed = s.first),
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Editable server address.
-///
-/// A text field rather than a build-time constant because a laptop's LAN IP
-/// changes with every DHCP lease, and rebuilding the app for each one wastes
-/// minutes that add up fast.
-class _ServerField extends ConsumerStatefulWidget {
-  const _ServerField({required this.reachable, required this.onChanged});
-
-  final bool? reachable;
-  final VoidCallback onChanged;
-
-  @override
-  ConsumerState<_ServerField> createState() => _ServerFieldState();
-}
-
-class _ServerFieldState extends ConsumerState<_ServerField> {
-  late final TextEditingController _controller = TextEditingController(
-    text: ref.read(serverUrlProvider),
-  );
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    FocusScope.of(context).unfocus();
-    await ref.read(serverUrlProvider.notifier).set(_controller.text);
-    widget.onChanged();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Icon(
-            switch (widget.reachable) {
-              null => Icons.hourglass_empty,
-              true => Icons.check_circle,
-              false => Icons.error,
-            },
-            color: switch (widget.reachable) {
-              null => Colors.grey,
-              true => Colors.green,
-              false => Colors.red,
-            },
-          ),
-          const SizedBox(width: 16),
           Expanded(
-            child: TextField(
-              controller: _controller,
-              keyboardType: TextInputType.url,
-              autocorrect: false,
-              decoration: InputDecoration(
-                labelText: 'Server',
-                isDense: true,
-                helperText: switch (widget.reachable) {
-                  null => 'checking...',
-                  true => 'reachable',
-                  false => 'unreachable',
-                },
-              ),
-              onSubmitted: (_) => _save(),
-            ),
-          ),
-          IconButton(
-            onPressed: _save,
-            icon: const Icon(Icons.save),
-            tooltip: 'Save and retest',
+            child: items.isEmpty
+                ? _EmptyState(feed: _feed)
+                : ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                    itemCount: items.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 8),
+                    itemBuilder: (_, i) => _HazardTile(item: items[i]),
+                  ),
           ),
         ],
       ),
@@ -348,42 +103,86 @@ class _ServerFieldState extends ConsumerState<_ServerField> {
   }
 }
 
-class _StatusTile extends StatelessWidget {
-  const _StatusTile({
-    required this.label,
-    required this.value,
-    this.ok,
-    this.onTap,
-  });
+class _Item {
+  const _Item({required this.type, required this.detail, required this.time});
 
-  final String label;
-  final String value;
+  final String type;
+  final String detail;
+  final DateTime time;
+}
 
-  /// null renders neutral, for a check that has not finished yet.
-  final bool? ok;
-  final VoidCallback? onTap;
+class _HazardTile extends StatelessWidget {
+  const _HazardTile({required this.item});
+
+  final _Item item;
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      dense: true,
-      onTap: onTap,
-      leading: Icon(
-        switch (ok) {
-          null => Icons.hourglass_empty,
-          true => Icons.check_circle,
-          false => Icons.error,
-        },
-        color: switch (ok) {
-          null => Colors.grey,
-          true => Colors.green,
-          false => Colors.red,
-        },
+    final style = hazardStyle(item.type);
+    final theme = Theme.of(context);
+    return Card(
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        leading: CircleAvatar(
+          radius: 22,
+          backgroundColor: style.color.withValues(alpha: 0.15),
+          child: Icon(style.icon, color: style.color),
+        ),
+        title: Text(
+          style.label,
+          style: theme.textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        subtitle: Text(item.detail),
+        trailing: Text(formatAgo(item.time), style: theme.textTheme.bodySmall),
       ),
-      title: Text(label),
-      subtitle: Text(value),
-      trailing: onTap == null ? null : const Icon(Icons.copy, size: 18),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({required this.feed});
+
+  final _Feed feed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final (icon, title, body) = switch (feed) {
+      _Feed.nearby => (
+        Icons.notifications_none_rounded,
+        'No hazards nearby',
+        'When another car reports a hazard close to you, it shows up here '
+            'and on screen.',
+      ),
+      _Feed.mine => (
+        Icons.videocam_off_outlined,
+        'Nothing spotted yet',
+        'Start detection on the Drive tab. Hazards your camera finds are '
+            'listed here.',
+      ),
+    };
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 56, color: theme.colorScheme.outline),
+            const SizedBox(height: 16),
+            Text(title, style: theme.textTheme.titleLarge),
+            const SizedBox(height: 8),
+            Text(
+              body,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
