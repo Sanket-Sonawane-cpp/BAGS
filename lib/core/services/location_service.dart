@@ -65,6 +65,10 @@ class LocationService {
   Future<Position> getCurrentPosition() =>
       Geolocator.getCurrentPosition(locationSettings: _settings);
 
+  /// The OS's cached fix, if any — instant, but possibly stale. A fallback
+  /// for when [getCurrentPosition] can't produce a fresh fix in time.
+  Future<Position?> getLastKnownPosition() => Geolocator.getLastKnownPosition();
+
   /// Continuous fixes, for reporting where this car is so the server knows who
   /// is near a reported obstruction.
   ///

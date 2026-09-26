@@ -52,8 +52,13 @@ class DetectionPipeline {
 
   final double confidenceThreshold;
 
+  /// How long a detection waits for a fresh GPS fix before falling back to
+  /// the last known one.
+  static const Duration _positionTimeout = Duration(seconds: 2);
+
   DateTime? _lastRun;
   bool _busy = false;
+  Position? _lastPosition;
   CameraController? _cameraController;
 
   final StreamController<DetectionEvent> _detections =
@@ -157,9 +162,20 @@ class DetectionPipeline {
   Future<Position?> _currentPositionOrNull() async {
     if (locationAccess != LocationAccess.granted) return null;
     try {
-      return await _locationService.getCurrentPosition();
+      // Bounded: an untimed high-accuracy request can hang for as long as
+      // there's no GPS fix (indoors, cold start), stalling the frame loop
+      // and then dropping the detection it was meant to tag.
+      return _lastPosition = await _locationService
+          .getCurrentPosition()
+          .timeout(_positionTimeout);
     } on Exception {
-      return null; // no fix yet — skip tagging this one, try again next time
+      // No fresh fix in time — a slightly stale position still places the
+      // obstruction far better than dropping the detection outright.
+      try {
+        return _lastPosition ??= await _locationService.getLastKnownPosition();
+      } on Exception {
+        return null; // no fix has ever existed on this device yet
+      }
     }
   }
 
