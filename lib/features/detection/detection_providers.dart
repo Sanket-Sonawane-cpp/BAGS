@@ -4,26 +4,33 @@ import '../../core/models/detection_event.dart';
 import 'detection_pipeline.dart';
 import 'inference_service.dart';
 
-/// The ML team's obstruction detector — converted from their `best.onnx`
-/// (Ultralytics YOLO11m) via `tools/convert_to_tflite.py`. [InferenceService]
-/// reads shape/quantization off the model itself, so dropping in a retrained
-/// version means re-running that script and nothing else, as long as the
-/// class list below still matches.
+/// The ML team's hazard detector: Ultralytics YOLO26n, exported end-to-end
+/// (NMS inside the graph, `[1, 300, 6]` output) with NCHW float32 input.
+/// [InferenceService] reads shape/layout/output kind off the model itself,
+/// so a retrained drop-in only needs the two constants below kept in sync
+/// with its `ml/hazard_detector.metadata.json`.
 ///
-/// Currently float32 (~80MB) because no representative calibration images
-/// exist yet for the int8 build docs/PROJECT_CONTEXT.md's battery/perf
-/// section actually calls for — rerun the conversion script with
-/// `--quantize --calibration-images <dir>` once some do.
-const String modelAsset = 'assets/models/obstruction_detector.tflite';
+/// ~7-8x faster than the YOLO11m it replaced (`obstruction_detector.tflite`)
+/// on the same CPU. Still float32 — an int8 build would be faster again.
+const String modelAsset = 'assets/models/hazard_detector.tflite';
 
-/// Class order exactly as embedded in best.onnx's metadata (`names` field) —
-/// keep in sync with the ML team's dataset, not guessed independently.
+/// Class order exactly as in the model's metadata (`classes`) — keep in sync
+/// with the ML team's dataset, not guessed independently.
 const List<String> modelLabels = [
   'accident',
   'non_accident',
   'fallen_object',
-  'pothole',
+  'flood',
 ];
+
+/// Per-class alert thresholds, the metadata's `deploy_conf`: the confidence
+/// at which each class hit the ML team's target precision on their test set.
+const Map<String, double> modelClassThresholds = {
+  'accident': 0.469,
+  'non_accident': 0.406,
+  'fallen_object': 0.477,
+  'flood': 0.25,
+};
 
 /// `assets/models/placeholder_classifier.tflite` — the original bring-up
 /// model, kept around for smoke-testing the camera/inference plumbing in
@@ -33,7 +40,11 @@ const String placeholderModelAsset =
     'assets/models/placeholder_classifier.tflite';
 
 final inferenceServiceProvider = Provider<InferenceService>((ref) {
-  return InferenceService(modelAsset: modelAsset, labels: modelLabels);
+  return InferenceService(
+    modelAsset: modelAsset,
+    labels: modelLabels,
+    classThresholds: modelClassThresholds,
+  );
 });
 
 final detectionPipelineProvider = Provider<DetectionPipeline>((ref) {

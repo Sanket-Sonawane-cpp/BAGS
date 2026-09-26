@@ -144,11 +144,9 @@ class _DetectionScreenState extends ConsumerState<DetectionScreen> {
           ),
           const SizedBox(height: 8),
           if (history.isEmpty)
-            Text(
-              'None yet — needs > '
-              '${(pipeline.confidenceThreshold * 100).toStringAsFixed(0)}% '
-              'confidence after NMS.',
-              style: const TextStyle(color: Colors.grey),
+            const Text(
+              "None yet — each class needs its own threshold's confidence.",
+              style: TextStyle(color: Colors.grey),
             ),
           for (final event in history)
             ListTile(

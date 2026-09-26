@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
@@ -25,6 +26,12 @@ enum ModelKind {
   /// Boxes + per-box class scores, e.g. `[1, 4 + numClasses, numAnchors]`.
   /// The shape a YOLO export (`best.onnx` → `.tflite`) produces.
   detector,
+
+  /// Finished detections, `[1, maxDetections, 6]` with rows of
+  /// `[x1, y1, x2, y2, confidence, classId]`. End-to-end exports (YOLO26)
+  /// produce this: NMS is already inside the graph, so rows only need
+  /// filtering.
+  postNms,
 }
 
 /// Result of running the model on a single frame — whichever obstruction
@@ -64,6 +71,8 @@ class InferenceService {
   InferenceService({
     required this.modelAsset,
     this.labels,
+    this.classThresholds = const {},
+    this.minScore = 0.25,
     this.decoder = const YoloDecoder(),
   });
 
@@ -74,6 +83,17 @@ class InferenceService {
   /// Label for each output class index, in order. When absent, detections
   /// are reported as `class_<index>`.
   final List<String>? labels;
+
+  /// Per-label alert threshold, from the model's metadata — each class's
+  /// confidence that hit the ML team's target precision on their test set.
+  /// Labels missing here fall back to [DetectionPipeline.confidenceThreshold].
+  final Map<String, double> classThresholds;
+
+  /// [ModelKind.postNms] rows below this are ignored entirely. The output is
+  /// always padded out to its full row count, mostly with near-zero noise.
+  final double minScore;
+
+  double? thresholdFor(String label) => classThresholds[label];
 
   /// Box decode + NMS for [ModelKind.detector] models. Unused for a
   /// classifier.
@@ -90,6 +110,10 @@ class InferenceService {
 
   late int _inputWidth;
   late int _inputHeight;
+
+  /// NCHW (`[1, 3, h, w]`, what litert_torch exports) rather than TFLite's
+  /// usual NHWC (`[1, h, w, 3]`).
+  late bool _channelsFirst;
   late TensorType _inputType;
   late QuantizationParams _inputParams;
 
@@ -108,9 +132,10 @@ class InferenceService {
     _interpreter = interpreter;
 
     final input = interpreter.getInputTensor(0);
-    final inputShape = input.shape; // [1, height, width, 3]
-    _inputHeight = inputShape[1];
-    _inputWidth = inputShape[2];
+    final inputShape = input.shape;
+    _channelsFirst = inputShape[1] == 3 && inputShape[3] != 3;
+    _inputHeight = _channelsFirst ? inputShape[2] : inputShape[1];
+    _inputWidth = _channelsFirst ? inputShape[3] : inputShape[2];
     _inputType = input.type;
     _inputParams = input.params;
 
@@ -120,9 +145,15 @@ class InferenceService {
     _outputElements = Tensor.computeNumElements(_outputShape);
     _outputParams = output.params;
 
-    // rank 2 -> [1, numClasses] (classifier). rank 3 -> boxes + per-class
-    // scores per anchor (detector) — see ModelKind.
-    kind = _outputShape.length >= 3 ? ModelKind.detector : ModelKind.classifier;
+    // rank 2 -> [1, numClasses] (classifier). rank 3 -> either finished
+    // [1, rows, 6] detections (postNms) or raw per-anchor scores (detector).
+    // A raw head with 2 classes is [1, 6, anchors], so the row count has to
+    // exceed 6 as well — anchors number in the thousands, rows in hundreds.
+    kind = _outputShape.length < 3
+        ? ModelKind.classifier
+        : _outputShape[2] == 6 && _outputShape[1] > 6
+        ? ModelKind.postNms
+        : ModelKind.detector;
 
     // Inference runs on a background isolate so a slow frame never drops the
     // camera preview or blocks touch input on the main isolate.
@@ -205,11 +236,24 @@ class InferenceService {
       throw StateError('Call load() before run().');
     }
 
-    final decoded = _preprocessor.decode(frame);
-    final normalized = _preprocessor.toNormalizedFloats(
-      decoded,
-      width: _inputWidth,
-      height: _inputHeight,
+    // Preprocessing is a per-pixel Dart loop over the whole input tensor;
+    // running it on a background isolate keeps the camera preview and touch
+    // input smooth. Only plain values are captured, never `this`, since the
+    // closure's whole context is copied to the new isolate.
+    final raw = RawFrame.fromCamera(frame);
+    final preprocessor = _preprocessor;
+    final width = _inputWidth;
+    final height = _inputHeight;
+    final letterbox = kind != ModelKind.classifier;
+    final channelsFirst = _channelsFirst;
+    final normalized = await Isolate.run(
+      () => preprocessor.toTensor(
+        raw,
+        width: width,
+        height: height,
+        letterbox: letterbox,
+        channelsFirst: channelsFirst,
+      ),
     );
 
     final inputBytes = _packInput(normalized);
@@ -226,9 +270,11 @@ class InferenceService {
       _outputElements,
     );
 
-    return kind == ModelKind.detector
-        ? _parseDetector(scores)
-        : _parseClassifier(scores);
+    return switch (kind) {
+      ModelKind.classifier => _parseClassifier(scores),
+      ModelKind.detector => _parseDetector(scores),
+      ModelKind.postNms => _parsePostNms(scores),
+    };
   }
 
   /// Converts normalized 0-1 floats to whatever byte layout the input tensor
@@ -311,6 +357,34 @@ class InferenceService {
       (a, b) => b.confidence > a.confidence ? b : a,
     );
     return _toResult(best.classIndex, best.confidence);
+  }
+
+  /// Picks one row of `[x1, y1, x2, y2, confidence, classId]`.
+  ///
+  /// Prefers the most confident row that clears its own class's threshold,
+  /// so a 0.3 flood (threshold 0.25) isn't hidden behind a 0.4 accident that
+  /// fails its 0.469. Failing that, returns the most confident row anyway,
+  /// so the dev screen can show what the model sees below threshold.
+  ClassificationResult? _parsePostNms(List<double> values) {
+    final rows = _outputShape[1];
+    final columns = _outputShape[2];
+    ClassificationResult? best;
+    ClassificationResult? bestPassing;
+
+    for (var row = 0; row < rows; row++) {
+      final confidence = values[row * columns + 4];
+      if (confidence < minScore) continue;
+
+      final result = _toResult(values[row * columns + 5].round(), confidence);
+      if (best == null || confidence > best.confidence) best = result;
+      final threshold = thresholdFor(result.label);
+      if (threshold != null &&
+          confidence >= threshold &&
+          (bestPassing == null || confidence > bestPassing.confidence)) {
+        bestPassing = result;
+      }
+    }
+    return bestPassing ?? best;
   }
 
   ClassificationResult _toResult(int classIndex, double confidence) {

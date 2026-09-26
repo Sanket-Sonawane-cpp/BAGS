@@ -50,7 +50,13 @@ class DetectionPipeline {
   /// the camera's native frame rate.
   final Duration minInterval;
 
+  /// Fallback for labels the model has no threshold of its own for — see
+  /// [InferenceService.classThresholds].
   final double confidenceThreshold;
+
+  /// The confidence a [label] must reach to count as a detection.
+  double thresholdFor(String label) =>
+      inferenceService.thresholdFor(label) ?? confidenceThreshold;
 
   /// How long a detection waits for a fresh GPS fix before falling back to
   /// the last known one.
@@ -130,7 +136,7 @@ class DetectionPipeline {
           result.classIndex == 0) {
         return;
       }
-      if (result.confidence < confidenceThreshold) return;
+      if (result.confidence < thresholdFor(result.label)) return;
 
       final position = await _currentPositionOrNull();
       if (position == null || _detections.isClosed) return;

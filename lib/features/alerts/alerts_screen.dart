@@ -10,6 +10,7 @@ import '../../core/models/detection_event.dart';
 import '../../core/providers.dart';
 import '../../core/services/location_service.dart';
 import '../detection/detection_screen.dart';
+import '../navigation/navigation_screen.dart';
 import 'alert_banner.dart';
 
 /// Working screen for the alerts half of the app.
@@ -138,6 +139,13 @@ class _AlertsScreenState extends ConsumerState<AlertsScreen> {
       appBar: AppBar(
         title: const Text('Alerts'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.map_outlined),
+            tooltip: 'Navigate',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const NavigationScreen()),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.camera_alt_outlined),
             tooltip: 'Detection (Member A)',
