@@ -13,8 +13,10 @@ import '../models/alert_event.dart';
 /// exists in that isolate.
 @pragma('vm:entry-point')
 Future<void> handleBackgroundMessage(RemoteMessage message) async {
-  // Deliberately minimal. Anything heavier belongs in the foreground handler,
-  // or in the notification the server itself attaches to the message.
+  // Deliberately minimal. For hazards the server attaches a `notification`
+  // block, which the OS shows on its own; tapping it comes back through
+  // onMessageOpenedApp / getInitialMessage. Only data-only pushes (the
+  // "clear road" class) end up here, and they have nothing to show.
   debugPrint('Background alert received: ${message.data}');
 }
 
@@ -80,9 +82,9 @@ class NotificationService {
   Stream<String> get tokenRefresh => _messaging.onTokenRefresh;
 
   void _emit(RemoteMessage message) {
-    // Alerts travel in the data payload, not the notification block, so the
-    // app can parse them into a typed object rather than reading a title
-    // string. Note every value arrives as a String — AlertEvent.fromJson
+    // Alerts are parsed from the data payload, not the notification block
+    // (which exists only for the OS to show while backgrounded), so the app
+    // gets a typed object rather than a title string. Note every value arrives as a String — AlertEvent.fromJson
     // parses leniently for exactly this reason.
     if (message.data.isEmpty) return;
 

@@ -20,6 +20,20 @@ SERVICE_ACCOUNT_PATH = Path(__file__).parent / "serviceAccountKey.json"
 
 _ready = False
 
+# Must match the channel MainActivity.kt creates. It is high importance, so
+# the alert pops up over whatever the driver has open (e.g. a maps app).
+ANDROID_CHANNEL_ID = "hazard_alerts"
+
+# Mirrors the labels in lib/core/hazards.dart. `non_accident` is left out on
+# purpose: it means "road is clear", which isn't worth interrupting a driver
+# for, so it stays a silent data-only push.
+HAZARD_LABELS = {
+    "accident": "Accident",
+    "fallen_object": "Fallen object",
+    "flood": "Flood",
+    "pothole": "Pothole",
+}
+
 
 def init_fcm() -> bool:
     """Initializes the Admin SDK if a service account key is present.
@@ -58,9 +72,12 @@ def send_alert(token: str, alert: dict) -> bool:
     AlertEvent.fromJson's lenient parsing on the Dart side, which was
     written for exactly this reason.
 
-    Data-only (no `notification` field): the app shows its own banner, not a
-    system notification, and parses `message.data` into a typed AlertEvent —
-    see NotificationService._emit.
+    Hazards also carry a `notification` block, so the OS shows it when the
+    app is backgrounded or killed — a data-only push there only reaches
+    handleBackgroundMessage, which can't show UI. In the foreground Android
+    doesn't display it; the app gets onMessage and shows its own banner.
+    Either way the app parses `message.data` into a typed AlertEvent — see
+    NotificationService._emit.
     """
     if not _ready:
         logger.info("[fcm skipped, no credentials] would push %s to %s", alert, token)
@@ -76,6 +93,7 @@ def send_alert(token: str, alert: dict) -> bool:
             "timestamp": str(alert["timestamp"]),
             "distance_m": str(alert["distance_m"]),
         },
+        **_visible_notification(alert),
     )
     try:
         messaging.send(message)
@@ -83,3 +101,38 @@ def send_alert(token: str, alert: dict) -> bool:
     except Exception as error:  # noqa: BLE001 - one bad token must not break the batch
         logger.warning("Push to %s failed: %s", token, error)
         return False
+
+
+def _visible_notification(alert: dict) -> dict:
+    """The Message kwargs that make an alert show up as a system notification.
+
+    Empty for non-hazard classes, which then stay data-only.
+    """
+    label = HAZARD_LABELS.get(alert["type"])
+    if label is None:
+        return {}
+
+    distance = float(alert["distance_m"])
+    # Same rounding as formatDistance in lib/core/hazards.dart.
+    if distance >= 1000:
+        distance_text = f"{distance / 1000:.1f} km"
+    else:
+        distance_text = f"{round(distance / 10) * 10} m"
+
+    return {
+        "notification": messaging.Notification(
+            title=f"{label} ahead",
+            body=f"Reported {distance_text} from you",
+        ),
+        "android": messaging.AndroidConfig(
+            # Normal priority gets held back while the phone dozes, which
+            # could deliver the alert after the driver has already passed it.
+            priority="high",
+            notification=messaging.AndroidNotification(
+                channel_id=ANDROID_CHANNEL_ID,
+                # One notification per hazard: a repeat push for the same
+                # detection replaces the earlier one instead of stacking.
+                tag=str(alert["id"]),
+            ),
+        ),
+    }

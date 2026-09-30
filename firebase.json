@@ -1,1 +1,26 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"bags-obstruction","appId":"1:970707761998:android:af2d1049f72d6ae3c5bc1f","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"bags-obstruction","configurations":{"android":"1:970707761998:android:af2d1049f72d6ae3c5bc1f","ios":"1:970707761998:ios:04c265d2ee9e1977c5bc1f","macos":"1:970707761998:ios:dc06e4b1f5622247c5bc1f","web":"1:970707761998:web:135fffdc47e048e6c5bc1f","windows":"1:970707761998:web:e6b6a4668990d363c5bc1f"}}}}}}
+{"flutter":
+    {"platforms":
+        {"android":
+            {"default":
+                {
+                    "projectId":"bags-obstruction",
+                    "appId":"1:970707761998:android:af2d1049f72d6ae3c5bc1f",
+                    "fileOutput":"android/app/google-services.json"
+                }
+            },
+            "dart":{
+                    "lib/firebase_options.dart":
+                        {
+                            "projectId":"bags-obstruction",
+                            "configurations":{
+                                                "android":"1:970707761998:android:af2d1049f72d6ae3c5bc1f",
+                                                "ios":"1:970707761998:ios:04c265d2ee9e1977c5bc1f",
+                                                "macos":"1:970707761998:ios:dc06e4b1f5622247c5bc1f",
+                                                "web":"1:970707761998:web:135fffdc47e048e6c5bc1f",
+                                                "windows":"1:970707761998:web:e6b6a4668990d363c5bc1f"
+                                            }
+                        }
+                    }
+        }
+    }
+}
