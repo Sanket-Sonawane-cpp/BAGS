@@ -44,9 +44,20 @@ class ApiService {
 
   /// Reports an obstruction this car detected.
   ///
+  /// [carId] is the same id [postLocation] sends, so the server can skip
+  /// pushing the alert back to the car that reported it. It goes on the
+  /// request rather than into [DetectionEvent], which only describes the
+  /// hazard itself.
+  ///
   /// Returns the server-assigned id.
-  Future<String> postDetection(DetectionEvent event) async {
-    final response = await _post('/detection', event.toJson());
+  Future<String> postDetection(
+    DetectionEvent event, {
+    required String carId,
+  }) async {
+    final response = await _post('/detection', {
+      ...event.toJson(),
+      'car_id': carId,
+    });
     return (jsonDecode(response) as Map<String, dynamic>)['id'].toString();
   }
 

@@ -70,7 +70,9 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   Future<void> _report(DetectionEvent event) async {
     if (!ref.read(reportDetectionsProvider)) return;
     try {
-      await ref.read(apiServiceProvider).postDetection(event);
+      await ref
+          .read(apiServiceProvider)
+          .postDetection(event, carId: ref.read(carIdProvider));
     } on Exception {
       // Routine on a moving-car connection; the next detection tries again.
     }

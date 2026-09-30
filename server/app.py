@@ -61,6 +61,9 @@ class DetectionIn(BaseModel):
     lat: float
     lng: float
     timestamp: datetime
+    # The reporting car, so it isn't pushed its own detection. Optional so
+    # older app builds that don't send it still get recorded.
+    car_id: str | None = None
 
 
 class LocationIn(BaseModel):
@@ -87,7 +90,7 @@ def health() -> dict:
 @app.post("/detection")
 def post_detection(event: DetectionIn) -> dict:
     """Receives an obstruction the app detected on-device, then pushes it to
-    every nearby car that has a known location and token."""
+    every other nearby car that has a known location and token."""
     record = db.insert_detection(
         event.type, event.confidence, event.lat, event.lng, event.timestamp
     )
@@ -102,6 +105,9 @@ def post_detection(event: DetectionIn) -> dict:
     nearby = db.nearby_cars_with_token(event.lat, event.lng, ALERT_RADIUS_M)
     pushed = 0
     for car in nearby:
+        # The reporter already saw it on its own screen.
+        if car["car_id"] == event.car_id:
+            continue
         alert = {
             "id": record["id"],
             "type": record["type"],
