@@ -36,29 +36,47 @@ class KnownHazards extends Notifier<List<AlertEvent>> {
 
   @override
   List<AlertEvent> build() {
-    ref.listen(alertHistoryProvider, (_, alerts) => _add(alerts));
+    // Only the newly pushed alerts: re-adding the whole history would bring
+    // back reports a refresh has since dropped as deleted on the server.
+    ref.listen(alertHistoryProvider, (previous, alerts) {
+      final seen = {for (final alert in previous ?? const []) alert.id};
+      _add(alerts.where((alert) => !seen.contains(alert.id)));
+    });
     for (final alert in ref.read(alertHistoryProvider)) {
       _reports[alert.id] = alert;
     }
     return _merged();
   }
 
-  /// Fetches what the server knows within [radiusMeters] of [center].
+  /// Syncs with what the server knows within [radiusMeters] of [center].
   ///
+  /// The server is the source of truth for that area: anything cached there
+  /// that it no longer returns (cleared by `/reset`, or deleted) is dropped.
   /// Failures are ignored: the map just keeps what it already has.
   Future<void> refreshAround(LatLng center, double radiusMeters) async {
+    final List<AlertEvent> alerts;
     try {
-      final alerts = await ref
+      alerts = await ref
           .read(apiServiceProvider)
           .fetchNearbyAlerts(
             latitude: center.latitude,
             longitude: center.longitude,
             radiusMeters: radiusMeters,
           );
-      _add(alerts);
     } on ApiException {
       // Routine on a moving-car connection; the next refresh tries again.
+      return;
     }
+
+    const distance = Distance();
+    final current = {for (final alert in alerts) alert.id};
+    _reports.removeWhere(
+      (id, alert) =>
+          !current.contains(id) &&
+          distance(center, LatLng(alert.latitude, alert.longitude)) <=
+              radiusMeters,
+    );
+    _add(alerts);
   }
 
   void _add(Iterable<AlertEvent> alerts) {

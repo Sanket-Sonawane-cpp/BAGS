@@ -61,9 +61,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   DateTime? _lastReroute;
   bool _rerouting = false;
 
-  /// Re-fetches hazards from the server while navigating. Pushes already
-  /// cover new reports; this catches ones missed while offline or reported
-  /// by this phone (which the server doesn't push back to it).
+  /// Re-syncs hazards with the server once there's a GPS fix. Pushes already
+  /// cover new reports; this catches ones missed while offline, ones this
+  /// phone reported (the server doesn't push those back to it), and ones
+  /// cleared on the server.
   Timer? _hazardRefresh;
 
   bool get _navigating => _positionSub != null;
@@ -113,11 +114,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
         const Duration(seconds: 10),
       );
       _setMe(fresh, recenter: last == null);
-      unawaited(
-        _refreshHazards(
-          LatLng(fresh.latitude, fresh.longitude),
-          _nearbyHazardMeters,
-        ),
+      _syncHazards();
+      _hazardRefresh ??= Timer.periodic(
+        _hazardRefreshInterval,
+        (_) => _syncHazards(),
       );
     } on Exception catch (error) {
       if (mounted && _me == null) setState(() => _error = 'No GPS fix: $error');
@@ -129,6 +129,15 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     final point = LatLng(position.latitude, position.longitude);
     setState(() => _me = point);
     if (recenter && _mapReady && _route == null) _map.move(point, 15);
+  }
+
+  /// Hazards around the car — and, while navigating, far enough to cover
+  /// the rest of the route.
+  void _syncHazards() {
+    final here = _me;
+    if (here == null) return;
+    final left = _navigating ? _update?.remainingMeters ?? 0 : 0.0;
+    unawaited(_refreshHazards(here, math.max(_nearbyHazardMeters, left)));
   }
 
   Future<void> _refreshHazards(LatLng center, double radiusMeters) => ref
@@ -269,13 +278,6 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
       _progress = progress;
       _update = progress.update(me);
       _lastReroute = null;
-      _hazardRefresh = Timer.periodic(_hazardRefreshInterval, (_) {
-        final here = _me;
-        final left = _update?.remainingMeters ?? 0;
-        if (here != null) {
-          unawaited(_refreshHazards(here, math.max(_nearbyHazardMeters, left)));
-        }
-      });
       _positionSub = ref
           .read(locationServiceProvider)
           .positionStream()
@@ -291,10 +293,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
 
   void _stop() {
     _positionSub?.cancel();
-    _hazardRefresh?.cancel();
     setState(() {
       _positionSub = null;
-      _hazardRefresh = null;
       _progress = null;
       _update = null;
     });
