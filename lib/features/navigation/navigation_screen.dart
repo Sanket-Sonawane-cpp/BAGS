@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -6,8 +7,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../../core/hazards.dart';
+import '../../core/models/alert_event.dart';
 import '../../core/providers.dart';
 import '../../core/services/location_service.dart';
+import 'hazard_routing.dart';
 import 'navigation_providers.dart';
 import 'route_progress.dart';
 import 'routing_service.dart';
@@ -17,8 +21,9 @@ import 'routing_service.dart';
 /// Pick a start (defaults to the current location) and a destination by
 /// search or by long-pressing the map, then Start to follow the route: the
 /// map tracks the car, shows the next maneuver, and reroutes after a wrong
-/// turn. Independent of the detection pipeline; it only shares
-/// [LocationService].
+/// turn. Reported hazards show as colored dots, and routes steer around them
+/// — including ones reported ahead mid-drive. Independent of the detection
+/// pipeline; it only shares [LocationService] and the alert feed.
 class NavigationScreen extends ConsumerStatefulWidget {
   const NavigationScreen({super.key});
 
@@ -38,6 +43,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   Place? _to;
 
   NavRoute? _route;
+
+  /// Hazards on [_route], and how many on the fastest route it avoids.
+  List<HazardOnRoute> _onRoute = const [];
+  int _avoided = 0;
+
   bool _routing = false;
   String? _error;
 
@@ -49,6 +59,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   NavUpdate? _update;
   StreamSubscription<Position>? _positionSub;
   DateTime? _lastReroute;
+  bool _rerouting = false;
+
+  /// Re-fetches hazards from the server while navigating. Pushes already
+  /// cover new reports; this catches ones missed while offline or reported
+  /// by this phone (which the server doesn't push back to it).
+  Timer? _hazardRefresh;
 
   bool get _navigating => _positionSub != null;
 
@@ -62,6 +78,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
 
   static const double _followZoom = 17;
 
+  static const Duration _hazardRefreshInterval = Duration(minutes: 1);
+
+  /// Hazards within this of where the map first centres are fetched.
+  static const double _nearbyHazardMeters = 5000;
+
   @override
   void initState() {
     super.initState();
@@ -72,6 +93,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   @override
   void dispose() {
     _positionSub?.cancel();
+    _hazardRefresh?.cancel();
     _map.dispose();
     super.dispose();
   }
@@ -91,6 +113,12 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
         const Duration(seconds: 10),
       );
       _setMe(fresh, recenter: last == null);
+      unawaited(
+        _refreshHazards(
+          LatLng(fresh.latitude, fresh.longitude),
+          _nearbyHazardMeters,
+        ),
+      );
     } on Exception catch (error) {
       if (mounted && _me == null) setState(() => _error = 'No GPS fix: $error');
     }
@@ -102,6 +130,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     setState(() => _me = point);
     if (recenter && _mapReady && _route == null) _map.move(point, 15);
   }
+
+  Future<void> _refreshHazards(LatLng center, double radiusMeters) => ref
+      .read(knownHazardsProvider.notifier)
+      .refreshAround(center, radiusMeters);
 
   Future<void> _pick({required bool origin}) async {
     final picked = await showSearch<_Pick?>(
@@ -150,6 +182,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   void _clear() => setState(() {
     _to = null;
     _route = null;
+    _onRoute = const [];
+    _avoided = 0;
     _error = null;
     _routeRequest++;
   });
@@ -169,22 +203,39 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
       _error = null;
     });
     try {
-      final route = await ref
-          .read(routingServiceProvider)
-          .route(from, to.point);
+      // Hazards anywhere between the two ends, with room for a detour.
+      const distance = Distance();
+      await _refreshHazards(
+        LatLng(
+          (from.latitude + to.point.latitude) / 2,
+          (from.longitude + to.point.longitude) / 2,
+        ),
+        distance(from, to.point) / 2 + 2000,
+      );
+      final plan = await ref
+          .read(hazardRoutePlannerProvider)
+          .plan(from, to.point, ref.read(knownHazardsProvider));
       if (!mounted || request != _routeRequest) return;
-      setState(() => _route = route);
-      _fit(route);
+      setState(() => _applyPlan(plan));
+      _fit(plan.route);
     } on Exception catch (error) {
       if (mounted && request == _routeRequest) {
         setState(() {
           _route = null;
+          _onRoute = const [];
           _error = '$error';
         });
       }
     } finally {
       if (mounted && request == _routeRequest) setState(() => _routing = false);
     }
+  }
+
+  /// Call inside setState.
+  void _applyPlan(PlannedRoute plan) {
+    _route = plan.route;
+    _onRoute = plan.onRoute;
+    _avoided = plan.avoidedCount;
   }
 
   void _fit(NavRoute route) {
@@ -218,6 +269,13 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
       _progress = progress;
       _update = progress.update(me);
       _lastReroute = null;
+      _hazardRefresh = Timer.periodic(_hazardRefreshInterval, (_) {
+        final here = _me;
+        final left = _update?.remainingMeters ?? 0;
+        if (here != null) {
+          unawaited(_refreshHazards(here, math.max(_nearbyHazardMeters, left)));
+        }
+      });
       _positionSub = ref
           .read(locationServiceProvider)
           .positionStream()
@@ -233,8 +291,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
 
   void _stop() {
     _positionSub?.cancel();
+    _hazardRefresh?.cancel();
     setState(() {
       _positionSub = null;
+      _hazardRefresh = null;
       _progress = null;
       _update = null;
     });
@@ -258,35 +318,108 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('You have arrived')));
     } else if (update.offRouteMeters > _offRouteMeters) {
-      _reroute(point);
+      unawaited(_reroute(point));
     }
   }
 
-  Future<void> _reroute(LatLng from) async {
+  /// Finds a new route from [from]: after a wrong turn, or with [around]
+  /// set, because that hazard was just reported on the road ahead.
+  Future<void> _reroute(LatLng from, {AlertEvent? around}) async {
     final to = _to;
     final now = DateTime.now();
     final last = _lastReroute;
-    if (to == null ||
-        (last != null && now.difference(last) < _rerouteCooldown)) {
+    if (to == null || _rerouting) return;
+    // A new hazard ahead can't wait out the wrong-turn cooldown.
+    if (around == null &&
+        last != null &&
+        now.difference(last) < _rerouteCooldown) {
       return;
     }
     _lastReroute = now;
+    _rerouting = true;
 
     try {
-      final route = await ref
-          .read(routingServiceProvider)
-          .route(from, to.point);
+      final plan = await ref
+          .read(hazardRoutePlannerProvider)
+          .plan(from, to.point, ref.read(knownHazardsProvider));
       if (!mounted || !_navigating) return;
-      final progress = RouteProgress(route);
+      final progress = RouteProgress(plan.route);
       setState(() {
-        _route = route;
+        _applyPlan(plan);
         _progress = progress;
         _update = progress.update(from);
       });
+      if (around != null) {
+        final label = hazardStyle(around.type).label;
+        final stuck = plan.onRoute.any((h) => _sameHazard(h.hazard, around));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              stuck
+                  ? '$label reported ahead — no way around it'
+                  : 'Rerouted around ${_withArticle(label.toLowerCase())} '
+                        'ahead',
+            ),
+          ),
+        );
+      }
     } on Exception {
       // Keep guiding along the old route; the next off-route fix after the
       // cooldown tries again.
+    } finally {
+      _rerouting = false;
     }
+  }
+
+  /// Keeps [_onRoute] current, and while navigating reroutes when a hazard
+  /// shows up on the road ahead.
+  void _onHazardsChanged(List<AlertEvent> hazards) {
+    final route = _route;
+    if (route == null) return;
+
+    final before = _onRoute;
+    final onRoute = hazardsOnRoute(route, hazards);
+    setState(() => _onRoute = onRoute);
+
+    final me = _me;
+    final along = _update?.alongMeters ?? 0;
+    if (!_navigating || me == null) return;
+
+    // Only hazards that are new: one already on the route was either
+    // unavoidable last time, or is a fresh report of the same thing.
+    const distance = Distance();
+    final fresh = onRoute.where(
+      (h) =>
+          h.alongMeters > along &&
+          distance(me, LatLng(h.hazard.latitude, h.hazard.longitude)) >
+              HazardRoutePlanner.endpointClearanceMeters &&
+          !before.any((b) => _sameHazard(b.hazard, h.hazard)),
+    );
+    if (fresh.isNotEmpty) {
+      unawaited(_reroute(me, around: fresh.first.hazard));
+    }
+  }
+
+  static bool _sameHazard(AlertEvent a, AlertEvent b) =>
+      a.id == b.id ||
+      (a.type == b.type &&
+          const Distance()(
+                LatLng(a.latitude, a.longitude),
+                LatLng(b.latitude, b.longitude),
+              ) <
+              KnownHazards.mergeRadiusMeters);
+
+  void _showHazard(AlertEvent hazard) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            '${hazardStyle(hazard.type).label} · reported '
+            '${formatAgo(hazard.timestamp)}',
+          ),
+        ),
+      );
   }
 
   void _recenter() {
@@ -297,6 +430,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(knownHazardsProvider, (_, next) => _onHazardsChanged(next));
+    final hazards = ref.watch(knownHazardsProvider);
     final route = _route;
     final me = _me;
 
@@ -333,6 +468,20 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
                     ),
                   ],
                 ),
+              MarkerLayer(
+                markers: [
+                  for (final hazard in hazards)
+                    Marker(
+                      point: LatLng(hazard.latitude, hazard.longitude),
+                      width: 26,
+                      height: 26,
+                      child: _HazardDot(
+                        hazard: hazard,
+                        onTap: () => _showHazard(hazard),
+                      ),
+                    ),
+                ],
+              ),
               MarkerLayer(
                 markers: [
                   if (_from != null)
@@ -431,6 +580,18 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
                 error: true,
               ),
             if (_error != null) _Note(_error!, error: true),
+            if (route != null && !_routing && _avoided > 0)
+              _Note(
+                'Avoiding $_avoided reported '
+                '${_avoided == 1 ? 'hazard' : 'hazards'}',
+              ),
+            if (route != null && !_routing && _onRoute.isNotEmpty)
+              _Note(
+                'Passes ${_onRoute.length} reported '
+                '${_onRoute.length == 1 ? 'hazard' : 'hazards'} '
+                '— no way around',
+                error: true,
+              ),
             if (_routing)
               const Padding(
                 padding: EdgeInsets.only(top: 8, right: 8),
@@ -468,6 +629,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     final update = _update;
     final step = update?.nextStep;
     final theme = Theme.of(context);
+    final hazardAhead = update == null
+        ? null
+        : _onRoute.where((h) => h.alongMeters > update.alongMeters).firstOrNull;
 
     return Card(
       color: theme.colorScheme.primaryContainer,
@@ -498,6 +662,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
                 ),
               ],
             ),
+            if (update != null && hazardAhead != null)
+              _HazardAhead(
+                hazard: hazardAhead.hazard,
+                inMeters: hazardAhead.alongMeters - update.alongMeters,
+              ),
             if (_error != null) _Note(_error!, error: true),
             const Divider(height: 20),
             Row(
@@ -549,6 +718,9 @@ String _formatLength(double meters) {
   if (meters >= 1000) return '${(meters / 1000).toStringAsFixed(1)} km';
   return '${(meters / 10).round() * 10} m';
 }
+
+String _withArticle(String noun) =>
+    '${'aeiou'.contains(noun[0]) ? 'an' : 'a'} $noun';
 
 String _formatDuration(double seconds) {
   final minutes = (seconds / 60).ceil();
@@ -603,6 +775,63 @@ class _Note extends StatelessWidget {
         style: TextStyle(
           color: error ? Theme.of(context).colorScheme.error : Colors.blueGrey,
         ),
+      ),
+    );
+  }
+}
+
+/// A reported hazard on the map, in its type's color and icon.
+class _HazardDot extends StatelessWidget {
+  const _HazardDot({required this.hazard, required this.onTap});
+
+  final AlertEvent hazard;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = hazardStyle(hazard.type);
+    return Tooltip(
+      message: style.label,
+      child: GestureDetector(
+        onTap: onTap,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: style.color,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 2),
+            boxShadow: const [BoxShadow(blurRadius: 4, color: Colors.black38)],
+          ),
+          child: Icon(style.icon, size: 14, color: Colors.white),
+        ),
+      ),
+    );
+  }
+}
+
+/// "Accident in 600 m" under the next maneuver, for a hazard that couldn't
+/// be routed around.
+class _HazardAhead extends StatelessWidget {
+  const _HazardAhead({required this.hazard, required this.inMeters});
+
+  final AlertEvent hazard;
+  final double inMeters;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = hazardStyle(hazard.type);
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        children: [
+          Icon(style.icon, color: style.color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '${style.label} in ${_formatLength(inMeters)}',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+          ),
+        ],
       ),
     );
   }

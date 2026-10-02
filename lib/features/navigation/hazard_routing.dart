@@ -1,0 +1,179 @@
+import 'dart:math' as math;
+
+import 'package:latlong2/latlong.dart';
+
+import '../../core/models/alert_event.dart';
+import 'route_progress.dart';
+import 'routing_service.dart';
+
+/// A reported hazard that lies on a route.
+class HazardOnRoute {
+  const HazardOnRoute(this.hazard, this.alongMeters);
+
+  final AlertEvent hazard;
+
+  /// How far along the route it is, comparable with [NavUpdate.alongMeters].
+  final double alongMeters;
+}
+
+/// Hazards within [corridorMeters] of the route line, in the order the route
+/// reaches them.
+///
+/// A hazard's position is the reporting car's GPS fix, which is routinely
+/// 10–30 m off, so the corridor is wider than a road.
+List<HazardOnRoute> hazardsOnRoute(
+  NavRoute route,
+  Iterable<AlertEvent> hazards, {
+  double corridorMeters = 40,
+}) {
+  final progress = RouteProgress(route);
+  final found = <HazardOnRoute>[];
+  for (final hazard in hazards) {
+    final at = progress.project(LatLng(hazard.latitude, hazard.longitude));
+    if (at.offRouteMeters <= corridorMeters) {
+      found.add(HazardOnRoute(hazard, at.alongMeters));
+    }
+  }
+  found.sort((a, b) => a.alongMeters.compareTo(b.alongMeters));
+  return found;
+}
+
+/// A route chosen by [HazardRoutePlanner], and the hazards it still passes.
+class PlannedRoute {
+  const PlannedRoute({
+    required this.route,
+    required this.onRoute,
+    required this.avoidedCount,
+  });
+
+  final NavRoute route;
+
+  /// Every hazard on [route], including ones that couldn't be avoided.
+  final List<HazardOnRoute> onRoute;
+
+  /// How many hazards on the fastest route this one steers clear of.
+  final int avoidedCount;
+}
+
+/// Picks a driving route that avoids reported hazards where it can.
+///
+/// The public OSRM server can't be told "avoid this point", so this works
+/// with what it can do: first ask for alternative routes, and if all of
+/// them pass a hazard, force detours through a point beside the first one.
+/// Requests go one at a time and stop at the first clean route, keeping
+/// load on the shared demo server low.
+class HazardRoutePlanner {
+  const HazardRoutePlanner(this._routing);
+
+  final RoutingService _routing;
+
+  /// Hazards this close to the start or destination are left alone: there's
+  /// no route around something you're already standing at, and trying just
+  /// produces loops. It also covers a car's own fresh report right under it.
+  static const double endpointClearanceMeters = 150;
+
+  /// How far to the side of a hazard detour points go, tried in order.
+  static const List<double> _detourOffsetsMeters = [400, 1000];
+
+  Future<PlannedRoute> plan(
+    LatLng from,
+    LatLng to,
+    Iterable<AlertEvent> hazards,
+  ) async {
+    const distance = Distance();
+    final avoidable = [
+      for (final h in hazards)
+        if (distance(from, _point(h)) > endpointClearanceMeters &&
+            distance(to, _point(h)) > endpointClearanceMeters)
+          h,
+    ];
+
+    final candidates = await _routing.routes(from, to, alternatives: true);
+    final fastest = candidates.first;
+    final blockingFastest = hazardsOnRoute(fastest, avoidable);
+
+    PlannedRoute result(NavRoute route, List<HazardOnRoute> blocking) =>
+        PlannedRoute(
+          route: route,
+          onRoute: hazardsOnRoute(route, hazards),
+          avoidedCount: math.max(0, blockingFastest.length - blocking.length),
+        );
+
+    if (blockingFastest.isEmpty) return result(fastest, blockingFastest);
+
+    // Best so far: fewest hazards, then quickest.
+    var best = fastest;
+    var bestBlocking = blockingFastest;
+    void consider(NavRoute route) {
+      final blocking = hazardsOnRoute(route, avoidable);
+      if (blocking.length < bestBlocking.length ||
+          (blocking.length == bestBlocking.length &&
+              route.durationSeconds < best.durationSeconds)) {
+        best = route;
+        bestBlocking = blocking;
+      }
+    }
+
+    candidates.skip(1).forEach(consider);
+    if (bestBlocking.isEmpty) return result(best, bestBlocking);
+
+    final first = blockingFastest.first;
+    for (final via in _detourPoints(fastest, first.hazard)) {
+      try {
+        consider((await _routing.routes(from, to, via: [via])).first);
+      } on Exception {
+        // One failed detour isn't fatal; the others may still work.
+        continue;
+      }
+      if (bestBlocking.isEmpty) break;
+    }
+    return result(best, bestBlocking);
+  }
+
+  /// Points to either side of [hazard], perpendicular to the route's
+  /// direction there, nearest first.
+  static List<LatLng> _detourPoints(NavRoute route, AlertEvent hazard) {
+    final at = _point(hazard);
+    final (east, north) = _directionAt(route, at);
+    return [
+      for (final offset in _detourOffsetsMeters)
+        for (final side in const [1, -1])
+          _offset(at, -north * offset * side, east * offset * side),
+    ];
+  }
+
+  /// Unit vector (east, north) of the route segment nearest [point].
+  static (double, double) _directionAt(NavRoute route, LatLng point) {
+    const distance = Distance();
+    final points = route.points;
+    var best = 0;
+    var bestDistance = double.infinity;
+    for (var i = 0; i < points.length - 1; i++) {
+      final d = distance(point, points[i]) + distance(point, points[i + 1]);
+      if (d < bestDistance && points[i] != points[i + 1]) {
+        bestDistance = d;
+        best = i;
+      }
+    }
+    if (points.length < 2) return (0, 1);
+
+    final a = points[best];
+    final b = points[best + 1];
+    final east = (b.longitude - a.longitude) * math.cos(a.latitudeInRad);
+    final north = b.latitude - a.latitude;
+    final length = math.sqrt(east * east + north * north);
+    return length == 0 ? (0, 1) : (east / length, north / length);
+  }
+
+  static LatLng _offset(LatLng from, double eastMeters, double northMeters) {
+    const metersPerDegree = 111320;
+    return LatLng(
+      from.latitude + northMeters / metersPerDegree,
+      from.longitude +
+          eastMeters / (metersPerDegree * math.cos(from.latitudeInRad)),
+    );
+  }
+
+  static LatLng _point(AlertEvent hazard) =>
+      LatLng(hazard.latitude, hazard.longitude);
+}

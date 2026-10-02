@@ -108,17 +108,34 @@ class RoutingService {
   }
 
   /// The fastest driving route from [from] to [to].
-  Future<NavRoute> route(LatLng from, LatLng to) async {
+  Future<NavRoute> route(LatLng from, LatLng to) async =>
+      (await routes(from, to)).first;
+
+  /// Driving routes from [from] to [to], fastest first.
+  ///
+  /// [via] forces the route through those points, in order, e.g. to detour
+  /// around a hazard. With [alternatives], OSRM may also return a couple of
+  /// other reasonable routes; it only does that when there are no [via]
+  /// points.
+  Future<List<NavRoute>> routes(
+    LatLng from,
+    LatLng to, {
+    List<LatLng> via = const [],
+    bool alternatives = false,
+  }) async {
     // OSRM takes coordinates as lng,lat — the reverse of LatLng's order.
-    final coords =
-        '${from.longitude},${from.latitude};'
-        '${to.longitude},${to.latitude}';
+    final coords = [
+      from,
+      ...via,
+      to,
+    ].map((p) => '${p.longitude},${p.latitude}').join(';');
     final body = await _get(
       Uri.parse('$routingBaseUrl/route/v1/driving/$coords').replace(
-        queryParameters: const {
+        queryParameters: {
           'overview': 'full',
           'geometries': 'geojson',
           'steps': 'true',
+          if (alternatives && via.isEmpty) 'alternatives': 'true',
         },
       ),
     );
@@ -129,19 +146,33 @@ class RoutingService {
       throw ApiException('No route found (${json['code']})');
     }
 
-    final route = routes.first as Map<String, dynamic>;
+    return [for (final r in routes) _parseRoute(r as Map<String, dynamic>)];
+  }
+
+  static NavRoute _parseRoute(Map<String, dynamic> route) {
     final geometry = route['geometry'] as Map<String, dynamic>;
-    final leg = (route['legs'] as List<dynamic>).first as Map<String, dynamic>;
+    final legs = route['legs'] as List<dynamic>;
+
+    // Each via point splits the route into legs, and OSRM ends every leg with
+    // "arrive" and starts the next with "depart". Only the real start and
+    // end should say that, so the ones at via points are dropped.
+    final steps = <RouteStep>[];
+    for (var i = 0; i < legs.length; i++) {
+      final leg = legs[i] as Map<String, dynamic>;
+      for (final raw in leg['steps'] as List<dynamic>) {
+        final step = _parseStep(raw as Map<String, dynamic>);
+        if (i > 0 && step.maneuverType == 'depart') continue;
+        if (i < legs.length - 1 && step.maneuverType == 'arrive') continue;
+        steps.add(step);
+      }
+    }
 
     return NavRoute(
       points: [
         for (final c in geometry['coordinates'] as List<dynamic>)
           _lngLat(c as List<dynamic>),
       ],
-      steps: [
-        for (final s in leg['steps'] as List<dynamic>)
-          _parseStep(s as Map<String, dynamic>),
-      ],
+      steps: steps,
       distanceMeters: (route['distance'] as num).toDouble(),
       durationSeconds: (route['duration'] as num).toDouble(),
     );

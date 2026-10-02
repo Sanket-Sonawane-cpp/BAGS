@@ -8,6 +8,7 @@ import 'routing_service.dart';
 class NavUpdate {
   const NavUpdate({
     required this.nextStep,
+    required this.alongMeters,
     required this.distanceToNextMeters,
     required this.remainingMeters,
     required this.remainingSeconds,
@@ -17,6 +18,10 @@ class NavUpdate {
 
   /// The upcoming maneuver, or null once past the last one.
   final RouteStep? nextStep;
+
+  /// How far along the route the car is, comparable with
+  /// [RouteProgress.project]'s result for things on the road ahead.
+  final double alongMeters;
   final double distanceToNextMeters;
   final double remainingMeters;
   final double remainingSeconds;
@@ -75,6 +80,7 @@ class RouteProgress {
     if (points.length < 2) {
       return const NavUpdate(
         nextStep: null,
+        alongMeters: 0,
         distanceToNextMeters: 0,
         remainingMeters: 0,
         remainingSeconds: 0,
@@ -120,6 +126,7 @@ class RouteProgress {
 
     return NavUpdate(
       nextStep: next,
+      alongMeters: along,
       distanceToNextMeters: math.max(0, toNext),
       remainingMeters: remaining,
       remainingSeconds: totalMeters == 0
@@ -127,6 +134,42 @@ class RouteProgress {
           : route.durationSeconds * remaining / totalMeters,
       offRouteMeters: bestDistance,
       arrived: remaining <= arrivalRadiusMeters,
+    );
+  }
+
+  /// Where [point] sits relative to the whole route: how far along it the
+  /// closest point is, and how far off the line [point] is.
+  ///
+  /// Unlike [update] this searches every segment and doesn't move the car's
+  /// progress — it's for placing things like hazards, not the car.
+  ({double alongMeters, double offRouteMeters}) project(LatLng point) {
+    final points = route.points;
+    if (points.length < 2) {
+      return (
+        alongMeters: 0,
+        offRouteMeters: points.isEmpty
+            ? double.infinity
+            : _metersBetween(point, points.first),
+      );
+    }
+
+    var bestSegment = 0;
+    var bestDistance = double.infinity;
+    var bestFraction = 0.0;
+    for (var i = 0; i < points.length - 1; i++) {
+      final (distance, fraction) = _toSegment(point, points[i], points[i + 1]);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestSegment = i;
+        bestFraction = fraction;
+      }
+    }
+    return (
+      alongMeters:
+          _cumulative[bestSegment] +
+          bestFraction *
+              (_cumulative[bestSegment + 1] - _cumulative[bestSegment]),
+      offRouteMeters: bestDistance,
     );
   }
 
