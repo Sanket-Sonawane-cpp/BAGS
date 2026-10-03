@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:latlong2/latlong.dart';
+
 import 'api_service.dart';
 import 'location_service.dart';
 
@@ -28,28 +30,43 @@ class LocationPinger {
   final Duration interval;
 
   Timer? _timer;
+  String? Function()? _tokenProvider;
+  List<LatLng>? Function()? _routeProvider;
 
   bool get isRunning => _timer != null;
 
   /// Starts pinging immediately, then every [interval].
   ///
-  /// [tokenProvider] is called fresh on every tick rather than read once
-  /// here, so a token that arrives — or rotates — after [start] is picked
-  /// up on the very next ping with no restart needed.
-  void start({String? Function()? tokenProvider}) {
+  /// [tokenProvider] and [routeProvider] are called fresh on every tick
+  /// rather than read once here, so a token that arrives — or rotates — or
+  /// a route started after [start] is picked up on the very next ping with
+  /// no restart needed.
+  void start({
+    String? Function()? tokenProvider,
+    List<LatLng>? Function()? routeProvider,
+  }) {
     if (_timer != null) return;
-    _timer = Timer.periodic(interval, (_) => _tick(tokenProvider));
-    unawaited(_tick(tokenProvider));
+    _tokenProvider = tokenProvider;
+    _routeProvider = routeProvider;
+    _timer = Timer.periodic(interval, (_) => _tick());
+    unawaited(_tick());
   }
 
-  Future<void> _tick(String? Function()? tokenProvider) async {
+  /// Pings now rather than at the next tick, e.g. so the server learns
+  /// about a route the moment navigation starts. No-op unless running.
+  void pingNow() {
+    if (_timer != null) unawaited(_tick());
+  }
+
+  Future<void> _tick() async {
     try {
       final position = await _locationService.getCurrentPosition();
       await _apiService.postLocation(
         carId: _carId,
         latitude: position.latitude,
         longitude: position.longitude,
-        fcmToken: tokenProvider?.call(),
+        fcmToken: _tokenProvider?.call(),
+        route: _routeProvider?.call(),
       );
     } on Exception {
       // Routine on a moving-car connection, or before a GPS fix exists yet;

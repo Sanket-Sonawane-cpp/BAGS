@@ -8,8 +8,30 @@ import '../../core/services/api_service.dart';
 import 'hazard_routing.dart';
 import 'routing_service.dart';
 
+/// OpenRouteService API key, which lets routes avoid hazards outright (see
+/// [RoutingService.canAvoid]). Entered in Settings and remembered; can be
+/// seeded at build time with `--dart-define=ORS_API_KEY=...`. Empty means
+/// none: routing falls back to the public OSRM server.
+class OrsApiKey extends Notifier<String> {
+  static const _key = 'ors_api_key';
+  static const _seed = String.fromEnvironment('ORS_API_KEY');
+
+  @override
+  String build() =>
+      ref.watch(sharedPreferencesProvider).getString(_key) ?? _seed;
+
+  Future<void> set(String key) async {
+    final cleaned = key.trim();
+    await ref.read(sharedPreferencesProvider).setString(_key, cleaned);
+    state = cleaned;
+  }
+}
+
+final orsApiKeyProvider = NotifierProvider<OrsApiKey, String>(OrsApiKey.new);
+
 final routingServiceProvider = Provider<RoutingService>((ref) {
-  final service = RoutingService();
+  final key = ref.watch(orsApiKeyProvider);
+  final service = RoutingService(orsApiKey: key.isEmpty ? null : key);
   ref.onDispose(service.dispose);
   return service;
 });

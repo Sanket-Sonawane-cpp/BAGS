@@ -21,8 +21,11 @@ import 'routing_service.dart';
 /// Pick a start (defaults to the current location) and a destination by
 /// search or by long-pressing the map, then Start to follow the route: the
 /// map tracks the car, shows the next maneuver, and reroutes after a wrong
-/// turn. Reported hazards show as colored dots, and routes steer around them
-/// — including ones reported ahead mid-drive. Independent of the detection
+/// turn. Reported hazards show as colored dots, and routes steer around them.
+/// A hazard reported ahead mid-drive brings up an offer of a route around
+/// it, taken automatically after a countdown — and so does a quicker route
+/// once a hazard is cleared (e.g. by a server reset). Independent of the
+/// detection
 /// pipeline; it only shares [LocationService] and the alert feed.
 class NavigationScreen extends ConsumerStatefulWidget {
   const NavigationScreen({super.key});
@@ -61,10 +64,26 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   DateTime? _lastReroute;
   bool _rerouting = false;
 
-  /// Re-syncs hazards with the server once there's a GPS fix. Pushes already
-  /// cover new reports; this catches ones missed while offline, ones this
-  /// phone reported (the server doesn't push those back to it), and ones
-  /// cleared on the server.
+  /// Hazards on the road ahead already dealt with this drive — offered a
+  /// way around, or known to be unavoidable — so they aren't offered again.
+  final List<AlertEvent> _handled = [];
+
+  /// Known hazards as of the last change, to spot ones that were cleared.
+  List<AlertEvent> _knownBefore = const [];
+
+  /// A new route waiting on the driver: around a newly reported hazard, or
+  /// quicker now that one was cleared.
+  _RerouteOffer? _offer;
+  Timer? _offerTimer;
+
+  /// Bumped per offer, so a slow plan can't resurface after the drive ended
+  /// or a newer hazard superseded it.
+  int _offerRequest = 0;
+
+  /// Re-syncs hazards with the server once there's a GPS fix. Pushes only
+  /// reach cars within 2 km of a report, so this is how hazards further
+  /// along the route show up; it also catches ones this phone reported (the
+  /// server doesn't push those back to it) and ones cleared on the server.
   Timer? _hazardRefresh;
 
   bool get _navigating => _positionSub != null;
@@ -79,7 +98,16 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
 
   static const double _followZoom = 17;
 
-  static const Duration _hazardRefreshInterval = Duration(minutes: 1);
+  /// Short, so a hazard reported far ahead (beyond push range) is offered
+  /// for rerouting within seconds. One small request to our own server.
+  static const Duration _hazardRefreshInterval = Duration(seconds: 15);
+
+  /// How long the driver has to decline a reroute before it's taken.
+  static const int _offerSeconds = 10;
+
+  /// A quicker route is only offered when it saves at least this much (and
+  /// 5% of the time left), so routing noise doesn't keep asking.
+  static const double _minSavingSeconds = 60;
 
   /// Hazards within this of where the map first centres are fetched.
   static const double _nearbyHazardMeters = 5000;
@@ -95,6 +123,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   void dispose() {
     _positionSub?.cancel();
     _hazardRefresh?.cancel();
+    _offerTimer?.cancel();
     _map.dispose();
     super.dispose();
   }
@@ -274,10 +303,15 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     if (route == null || !mounted) return;
 
     final progress = RouteProgress(route);
+    _publishRoute(route);
     setState(() {
       _progress = progress;
       _update = progress.update(me);
       _lastReroute = null;
+      // The plan already chose to pass these; don't offer them again.
+      _handled
+        ..clear()
+        ..addAll(_onRoute.map((h) => h.hazard));
       _positionSub = ref
           .read(locationServiceProvider)
           .positionStream()
@@ -293,6 +327,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
 
   void _stop() {
     _positionSub?.cancel();
+    _dismissOffer();
+    _publishRoute(null);
     setState(() {
       _positionSub = null;
       _progress = null;
@@ -322,19 +358,14 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     }
   }
 
-  /// Finds a new route from [from]: after a wrong turn, or with [around]
-  /// set, because that hazard was just reported on the road ahead.
-  Future<void> _reroute(LatLng from, {AlertEvent? around}) async {
+  /// Finds a new route from [from] after a wrong turn. It already steers
+  /// around every known hazard, so any pending offer is moot.
+  Future<void> _reroute(LatLng from) async {
     final to = _to;
     final now = DateTime.now();
     final last = _lastReroute;
     if (to == null || _rerouting) return;
-    // A new hazard ahead can't wait out the wrong-turn cooldown.
-    if (around == null &&
-        last != null &&
-        now.difference(last) < _rerouteCooldown) {
-      return;
-    }
+    if (last != null && now.difference(last) < _rerouteCooldown) return;
     _lastReroute = now;
     _rerouting = true;
 
@@ -343,26 +374,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
           .read(hazardRoutePlannerProvider)
           .plan(from, to.point, ref.read(knownHazardsProvider));
       if (!mounted || !_navigating) return;
-      final progress = RouteProgress(plan.route);
-      setState(() {
-        _applyPlan(plan);
-        _progress = progress;
-        _update = progress.update(from);
-      });
-      if (around != null) {
-        final label = hazardStyle(around.type).label;
-        final stuck = plan.onRoute.any((h) => _sameHazard(h.hazard, around));
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              stuck
-                  ? '$label reported ahead — no way around it'
-                  : 'Rerouted around ${_withArticle(label.toLowerCase())} '
-                        'ahead',
-            ),
-          ),
-        );
-      }
+      _dismissOffer();
+      _follow(plan);
     } on Exception {
       // Keep guiding along the old route; the next off-route fix after the
       // cooldown tries again.
@@ -371,13 +384,41 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     }
   }
 
-  /// Keeps [_onRoute] current, and while navigating reroutes when a hazard
-  /// shows up on the road ahead.
+  /// Tells the server which route this car is driving (null: none), so
+  /// hazards reported anywhere ahead on it are pushed here, not only ones
+  /// within its push radius. Sent straight away rather than at the next
+  /// location ping.
+  void _publishRoute(NavRoute? route) {
+    ref.read(activeRouteProvider.notifier).set(route?.points);
+    ref.read(locationPingerProvider).pingNow();
+  }
+
+  /// Switches guidance to [plan], from wherever the car is now.
+  void _follow(PlannedRoute plan) {
+    final progress = RouteProgress(plan.route);
+    final me = _me;
+    _publishRoute(plan.route);
+    setState(() {
+      _applyPlan(plan);
+      _progress = progress;
+      _update = me == null ? null : progress.update(me);
+      _handled.addAll(plan.onRoute.map((h) => h.hazard));
+    });
+  }
+
+  /// Keeps [_onRoute] current, and while navigating offers a way around a
+  /// hazard newly reported on the road ahead, or the quicker way once a
+  /// hazard is cleared.
   void _onHazardsChanged(List<AlertEvent> hazards) {
+    final before = _knownBefore;
+    _knownBefore = hazards;
+    bool known(AlertEvent hazard) => hazards.any((h) => _sameHazard(h, hazard));
+    // A cleared hazard reported again later is news again.
+    _handled.retainWhere(known);
+
     final route = _route;
     if (route == null) return;
 
-    final before = _onRoute;
     final onRoute = hazardsOnRoute(route, hazards);
     setState(() => _onRoute = onRoute);
 
@@ -385,19 +426,135 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     final along = _update?.alongMeters ?? 0;
     if (!_navigating || me == null) return;
 
-    // Only hazards that are new: one already on the route was either
-    // unavoidable last time, or is a fresh report of the same thing.
     const distance = Distance();
-    final fresh = onRoute.where(
-      (h) =>
-          h.alongMeters > along &&
-          distance(me, LatLng(h.hazard.latitude, h.hazard.longitude)) >
-              HazardRoutePlanner.endpointClearanceMeters &&
-          !before.any((b) => _sameHazard(b.hazard, h.hazard)),
-    );
-    if (fresh.isNotEmpty) {
-      unawaited(_reroute(me, around: fresh.first.hazard));
+    final fresh = onRoute
+        .where(
+          (h) =>
+              hazardStyle(h.hazard.type).blocksRoad &&
+              h.alongMeters > along &&
+              distance(me, LatLng(h.hazard.latitude, h.hazard.longitude)) >
+                  HazardRoutePlanner.endpointClearanceMeters &&
+              !_handled.any((seen) => _sameHazard(seen, h.hazard)),
+        )
+        .firstOrNull;
+    if (fresh != null) {
+      unawaited(_offerReroute(me, fresh.hazard));
+      return;
     }
+
+    // The road a cleared hazard closed may now be the quicker way.
+    final cleared = before.any(
+      (old) => hazardStyle(old.type).blocksRoad && !known(old),
+    );
+    if (cleared) unawaited(_offerFasterRoute(me));
+  }
+
+  /// Plans a route around [hazard] and offers it, or says there's none.
+  Future<void> _offerReroute(LatLng from, AlertEvent hazard) async {
+    final to = _to;
+    if (to == null) return;
+    _handled.add(hazard);
+    final request = ++_offerRequest;
+
+    final PlannedRoute plan;
+    try {
+      plan = await ref
+          .read(hazardRoutePlannerProvider)
+          .plan(from, to.point, ref.read(knownHazardsProvider));
+    } on Exception {
+      // Routing server unreachable: let the next sync offer it again.
+      _handled.remove(hazard);
+      return;
+    }
+    if (!mounted || !_navigating || request != _offerRequest) return;
+
+    final label = hazardStyle(hazard.type).label;
+    if (plan.onRoute.any((h) => _sameHazard(h.hazard, hazard))) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$label reported ahead — no way around it')),
+      );
+      return;
+    }
+
+    _showOffer(
+      _RerouteOffer(hazard: hazard, plan: plan, secondsLeft: _offerSeconds),
+    );
+  }
+
+  /// Offers the fastest route from [from] if it beats the rest of the
+  /// current one by enough to be worth switching, without passing more
+  /// blocking hazards than it.
+  Future<void> _offerFasterRoute(LatLng from) async {
+    final to = _to;
+    final update = _update;
+    // A pending offer already re-planned with what's known.
+    if (to == null || update == null || _offer != null) return;
+    final request = ++_offerRequest;
+
+    final PlannedRoute plan;
+    try {
+      plan = await ref
+          .read(hazardRoutePlannerProvider)
+          .plan(from, to.point, ref.read(knownHazardsProvider));
+    } on Exception {
+      return; // The current route still works.
+    }
+    if (!mounted || !_navigating || request != _offerRequest) return;
+
+    int blocking(Iterable<HazardOnRoute> onRoute) =>
+        onRoute.where((h) => hazardStyle(h.hazard.type).blocksRoad).length;
+    final left = update.remainingSeconds;
+    final saved = left - plan.route.durationSeconds;
+    final aheadNow = _onRoute.where((h) => h.alongMeters > update.alongMeters);
+    if (saved < math.max(_minSavingSeconds, left * 0.05) ||
+        blocking(plan.onRoute) > blocking(aheadNow)) {
+      return;
+    }
+    _showOffer(_RerouteOffer(plan: plan, secondsLeft: _offerSeconds));
+  }
+
+  /// Shows [offer], counting down to taking it.
+  void _showOffer(_RerouteOffer offer) {
+    _offerTimer?.cancel();
+    setState(() => _offer = offer);
+    _offerTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final offer = _offer;
+      if (!mounted || offer == null) return;
+      if (offer.secondsLeft <= 1) {
+        _acceptOffer();
+      } else {
+        setState(() => _offer = offer.tick());
+      }
+    });
+  }
+
+  void _acceptOffer() {
+    final offer = _offer;
+    if (offer == null) return;
+    _dismissOffer();
+    if (!_navigating) return;
+    _follow(offer.plan);
+    final hazard = offer.hazard;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          hazard == null
+              ? 'Switched to the faster route'
+              : 'Rerouted around '
+                    '${_withArticle(hazardStyle(hazard.type).label.toLowerCase())}'
+                    ' ahead',
+        ),
+      ),
+    );
+  }
+
+  /// Drops the offer, keeping the current route. The hazard stays handled,
+  /// so it isn't offered again.
+  void _dismissOffer() {
+    _offerTimer?.cancel();
+    _offerTimer = null;
+    _offerRequest++;
+    if (_offer != null && mounted) setState(() => _offer = null);
   }
 
   static bool _sameHazard(AlertEvent a, AlertEvent b) =>
@@ -456,6 +613,19 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
                 // OSM's tile policy blocks clients that don't identify themselves.
                 userAgentPackageName: 'io.github.aditya692005.bags',
               ),
+              if (_offer != null)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: _offer!.plan.route.points,
+                      strokeWidth: 6,
+                      color: Colors.green.shade600,
+                      borderStrokeWidth: 2,
+                      borderColor: Colors.white,
+                      pattern: StrokePattern.dashed(segments: const [12, 8]),
+                    ),
+                  ],
+                ),
               if (route != null)
                 PolylineLayer(
                   polylines: [
@@ -524,9 +694,22 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
             right: 8,
             child: _navigating ? _guidanceCard(context) : _planCard(context),
           ),
+          if (_offer != null)
+            Positioned(
+              left: 8,
+              right: 8,
+              bottom: 8,
+              child: _RerouteCard(
+                offer: _offer!,
+                totalSeconds: _offerSeconds,
+                currentSeconds: _update?.remainingSeconds,
+                onAccept: _acceptOffer,
+                onKeep: _dismissOffer,
+              ),
+            ),
         ],
       ),
-      floatingActionButton: me == null
+      floatingActionButton: me == null || _offer != null
           ? null
           : FloatingActionButton.small(
               onPressed: _recenter,
@@ -539,6 +722,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   Widget _planCard(BuildContext context) {
     final route = _route;
     final theme = Theme.of(context);
+    final blocking = _onRoute
+        .where((h) => hazardStyle(h.hazard.type).blocksRoad)
+        .length;
+    final warnings = _onRoute.length - blocking;
 
     return Card(
       child: Padding(
@@ -585,12 +772,18 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
                 'Avoiding $_avoided reported '
                 '${_avoided == 1 ? 'hazard' : 'hazards'}',
               ),
-            if (route != null && !_routing && _onRoute.isNotEmpty)
+            if (route != null && !_routing && blocking > 0)
               _Note(
-                'Passes ${_onRoute.length} reported '
-                '${_onRoute.length == 1 ? 'hazard' : 'hazards'} '
+                'Passes $blocking reported '
+                '${blocking == 1 ? 'hazard' : 'hazards'} '
                 '— no way around',
                 error: true,
+              ),
+            if (route != null && !_routing && warnings > 0)
+              _Note(
+                '$warnings reported '
+                '${warnings == 1 ? 'pothole or hazard' : 'potholes or hazards'}'
+                ' on the way — drive carefully',
               ),
             if (_routing)
               const Padding(
@@ -832,6 +1025,120 @@ class _HazardAhead extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A new route counting down to being taken automatically: around
+/// [hazard], or — with no hazard — quicker now that one was cleared.
+class _RerouteOffer {
+  const _RerouteOffer({
+    required this.plan,
+    required this.secondsLeft,
+    this.hazard,
+  });
+
+  final AlertEvent? hazard;
+  final PlannedRoute plan;
+  final int secondsLeft;
+
+  _RerouteOffer tick() =>
+      _RerouteOffer(hazard: hazard, plan: plan, secondsLeft: secondsLeft - 1);
+}
+
+/// "Accident reported ahead" or "Road cleared": take the new route or keep
+/// the current one.
+class _RerouteCard extends StatelessWidget {
+  const _RerouteCard({
+    required this.offer,
+    required this.totalSeconds,
+    required this.currentSeconds,
+    required this.onAccept,
+    required this.onKeep,
+  });
+
+  final _RerouteOffer offer;
+  final int totalSeconds;
+
+  /// Time left on the current route, to show what the new one costs.
+  final double? currentSeconds;
+  final VoidCallback onAccept;
+  final VoidCallback onKeep;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final hazard = offer.hazard;
+    final style = hazard == null ? null : hazardStyle(hazard.type);
+    final route = offer.plan.route;
+    final current = currentSeconds;
+    final extraMinutes = current == null
+        ? 0
+        : ((route.durationSeconds - current) / 60).round();
+    final difference = switch (extraMinutes) {
+      > 0 => ' (+$extraMinutes min)',
+      < 0 => ' (${-extraMinutes} min faster)',
+      _ => '',
+    };
+
+    return Card(
+      elevation: 6,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  style?.icon ?? Icons.bolt,
+                  color: style?.color ?? Colors.green.shade700,
+                  size: 32,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        style == null
+                            ? 'Road cleared — faster route'
+                            : '${style.label} reported ahead',
+                        style: theme.textTheme.titleMedium,
+                      ),
+                      Text(
+                        'New route: ${_formatLength(route.distanceMeters)} · '
+                        '${_formatDuration(route.durationSeconds)}$difference',
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            LinearProgressIndicator(value: offer.secondsLeft / totalSeconds),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: onKeep,
+                    child: const Text('Keep route'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: onAccept,
+                    child: Text('New route (${offer.secondsLeft})'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

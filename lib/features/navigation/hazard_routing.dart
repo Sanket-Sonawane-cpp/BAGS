@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:latlong2/latlong.dart';
 
+import '../../core/hazards.dart';
 import '../../core/models/alert_event.dart';
 import 'route_progress.dart';
 import 'routing_service.dart';
@@ -55,13 +56,18 @@ class PlannedRoute {
   final int avoidedCount;
 }
 
-/// Picks a driving route that avoids reported hazards where it can.
+/// Picks a driving route that avoids road-blocking hazards where it can.
 ///
-/// The public OSRM server can't be told "avoid this point", so this works
-/// with what it can do: first ask for alternative routes, and if all of
-/// them pass a hazard, force detours through a point beside the first one.
-/// Requests go one at a time and stop at the first clean route, keeping
-/// load on the shared demo server low.
+/// Only hazards that block the road ([HazardStyle.blocksRoad]) are avoided;
+/// the rest, like potholes, stay on the route as warnings.
+///
+/// With OpenRouteService ([RoutingService.canAvoid]) that's one request:
+/// route around every blocking hazard at once. The public OSRM server can't
+/// be told "avoid this point", so without it this works with what it can
+/// do: first ask for alternative routes, and if all of them pass a hazard,
+/// force detours through a point beside the first one. Requests go one at a
+/// time and stop at the first clean route, keeping load on the shared demo
+/// server low.
 class HazardRoutePlanner {
   const HazardRoutePlanner(this._routing);
 
@@ -83,12 +89,17 @@ class HazardRoutePlanner {
     const distance = Distance();
     final avoidable = [
       for (final h in hazards)
-        if (distance(from, _point(h)) > endpointClearanceMeters &&
+        if (hazardStyle(h.type).blocksRoad &&
+            distance(from, _point(h)) > endpointClearanceMeters &&
             distance(to, _point(h)) > endpointClearanceMeters)
           h,
     ];
 
-    final candidates = await _routing.routes(from, to, alternatives: true);
+    final candidates = await _routing.routes(
+      from,
+      to,
+      alternatives: !_routing.canAvoid,
+    );
     final fastest = candidates.first;
     final blockingFastest = hazardsOnRoute(fastest, avoidable);
 
@@ -112,6 +123,21 @@ class HazardRoutePlanner {
         best = route;
         bestBlocking = blocking;
       }
+    }
+
+    if (_routing.canAvoid) {
+      try {
+        final around = await _routing.routes(
+          from,
+          to,
+          avoid: [for (final h in avoidable) _point(h)],
+        );
+        consider(around.first);
+      } on Exception {
+        // No way around them all (e.g. the only bridge is blocked): keep
+        // the fastest route, with the hazards on it flagged.
+      }
+      return result(best, bestBlocking);
     }
 
     candidates.skip(1).forEach(consider);

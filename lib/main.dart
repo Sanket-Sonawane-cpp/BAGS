@@ -15,9 +15,7 @@ Future<void> main() async {
   // Required before any plugin work happens ahead of runApp.
   WidgetsFlutterBinding.ensureInitialized();
 
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   // Must be registered here, before runApp: when a push wakes the app from a
   // killed state, Android runs this handler in its own isolate starting from

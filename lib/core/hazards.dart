@@ -8,6 +8,7 @@ class HazardStyle {
     required this.icon,
     required this.color,
     this.isHazard = true,
+    this.blocksRoad = false,
   });
 
   final String label;
@@ -16,6 +17,12 @@ class HazardStyle {
 
   /// False for classes that mean "all clear", such as `non_accident`.
   final bool isHazard;
+
+  /// Whether it's worth driving a different way to avoid. A pothole only
+  /// earns a warning; an accident or a flood earns a reroute. False for
+  /// unknown classes, so a new model label can't start moving cars around
+  /// before anyone has decided what it means.
+  final bool blocksRoad;
 }
 
 const Map<String, HazardStyle> _styles = {
@@ -23,16 +30,19 @@ const Map<String, HazardStyle> _styles = {
     label: 'Accident',
     icon: Icons.car_crash,
     color: Color(0xFFE53935),
+    blocksRoad: true,
   ),
   'fallen_object': HazardStyle(
     label: 'Fallen object',
     icon: Icons.warning_rounded,
     color: Color(0xFFFB8C00),
+    blocksRoad: true,
   ),
   'flood': HazardStyle(
     label: 'Flood',
     icon: Icons.flood,
     color: Color(0xFF1E88E5),
+    blocksRoad: true,
   ),
   'pothole': HazardStyle(
     label: 'Pothole',

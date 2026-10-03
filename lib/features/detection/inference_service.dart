@@ -407,30 +407,30 @@ class InferenceService {
     final view = ByteData.view(bytes.buffer);
     return switch (type) {
       TensorType.float32 => List.generate(
-          count,
-          (i) => view.getFloat32(i * 4, Endian.little),
-        ),
+        count,
+        (i) => view.getFloat32(i * 4, Endian.little),
+      ),
       TensorType.uint8 => List.generate(
-          count,
-          (i) => params.scale == 0
-              ? bytes[i] / 255.0
-              : (bytes[i] - params.zeroPoint) * params.scale,
-        ),
+        count,
+        (i) => params.scale == 0
+            ? bytes[i] / 255.0
+            : (bytes[i] - params.zeroPoint) * params.scale,
+      ),
       TensorType.int8 => List.generate(count, (i) {
-          final raw = view.getInt8(i);
-          return params.scale == 0
-              ? raw / 127.0
-              : (raw - params.zeroPoint) * params.scale;
-        }),
+        final raw = view.getInt8(i);
+        return params.scale == 0
+            ? raw / 127.0
+            : (raw - params.zeroPoint) * params.scale;
+      }),
       _ => throw UnsupportedError('Unsupported output tensor type $type.'),
     };
   }
 
   int _bytesPerElement(TensorType type) => switch (type) {
-        TensorType.float32 => 4,
-        TensorType.uint8 || TensorType.int8 => 1,
-        _ => throw UnsupportedError('Unsupported tensor type $type.'),
-      };
+    TensorType.float32 => 4,
+    TensorType.uint8 || TensorType.int8 => 1,
+    _ => throw UnsupportedError('Unsupported tensor type $type.'),
+  };
 
   Future<void> dispose() async {
     await _isolateInterpreter?.close();

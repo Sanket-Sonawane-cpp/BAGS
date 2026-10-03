@@ -26,14 +26,15 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import uvicorn
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import db
 import fcm
+import routes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bags.server")
@@ -41,6 +42,10 @@ logger = logging.getLogger("bags.server")
 # How far a detection reaches. Matches tools/mock_server.py's /alerts
 # default so behaviour doesn't change when swapping which server is running.
 ALERT_RADIUS_M = 2000
+
+# A navigating car's route counts for pushes only while it keeps pinging:
+# one that went quiet (app killed, phone off) isn't driving it any more.
+ROUTE_FRESHNESS = timedelta(minutes=2)
 
 
 @asynccontextmanager
@@ -80,6 +85,9 @@ class LocationIn(BaseModel):
     lat: float
     lng: float
     fcm_token: str | None = None
+    # The route being navigated, as [[lat, lng], ...]. Absent or null when
+    # not navigating, which clears any route sent earlier.
+    route: list[tuple[float, float]] | None = Field(default=None, max_length=5000)
 
 
 @app.get("/health")
@@ -90,7 +98,7 @@ def health() -> dict:
 @app.post("/detection")
 def post_detection(event: DetectionIn) -> dict:
     """Receives an obstruction the app detected on-device, then pushes it to
-    every other nearby car that has a known location and token."""
+    every other car that's near it, or navigating a route that passes it."""
     record = db.insert_detection(
         event.type, event.confidence, event.lat, event.lng, event.timestamp
     )
@@ -102,11 +110,13 @@ def post_detection(event: DetectionIn) -> dict:
         event.lng,
     )
 
-    nearby = db.nearby_cars_with_token(event.lat, event.lng, ALERT_RADIUS_M)
     pushed = 0
-    for car in nearby:
+    for car in db.cars_with_token():
         # The reporter already saw it on its own screen.
         if car["car_id"] == event.car_id:
+            continue
+        distance = _alert_distance(car, event.lat, event.lng)
+        if distance is None:
             continue
         alert = {
             "id": record["id"],
@@ -114,7 +124,7 @@ def post_detection(event: DetectionIn) -> dict:
             "lat": record["lat"],
             "lng": record["lng"],
             "timestamp": record["timestamp"],
-            "distance_m": round(car["distance_m"], 1),
+            "distance_m": round(distance, 1),
         }
         if fcm.send_alert(car["fcm_token"], alert):
             pushed += 1
@@ -122,12 +132,35 @@ def post_detection(event: DetectionIn) -> dict:
     return {"id": record["id"], "status": "recorded", "pushed": pushed}
 
 
+def _alert_distance(car: dict, lat: float, lng: float) -> float | None:
+    """How far `car` is from a hazard at lat/lng, if it should be told.
+
+    Within ALERT_RADIUS_M: the straight-line distance. Further away, only if
+    the car is navigating a route that reaches the hazard: the distance
+    along that route. None otherwise.
+    """
+    straight = db.haversine_meters(lat, lng, car["lat"], car["lng"])
+    if straight <= ALERT_RADIUS_M:
+        return straight
+    route = car["route"]
+    fresh = datetime.now(timezone.utc) - car["updated_at"] <= ROUTE_FRESHNESS
+    if not route or not fresh:
+        return None
+    return routes.distance_ahead(route, (car["lat"], car["lng"]), (lat, lng))
+
+
 @app.post("/location")
 def post_location(ping: LocationIn) -> dict:
     """Records where a car currently is (and its token, if sent), so it can
     be pushed alerts about nearby hazards."""
-    db.upsert_car(ping.car_id, ping.lat, ping.lng, ping.fcm_token)
-    logger.info("[location] %s at %.5f,%.5f", ping.car_id, ping.lat, ping.lng)
+    db.upsert_car(ping.car_id, ping.lat, ping.lng, ping.fcm_token, ping.route)
+    logger.info(
+        "[location] %s at %.5f,%.5f%s",
+        ping.car_id,
+        ping.lat,
+        ping.lng,
+        f", navigating ({len(ping.route)} route points)" if ping.route else "",
+    )
     return {"status": "ok"}
 
 

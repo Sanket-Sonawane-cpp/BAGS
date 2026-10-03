@@ -53,7 +53,10 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   /// answers the prompt. `start()` is a no-op if already running.
   void _startPinger(LocationPinger pinger) {
     if (!_locationGranted) return;
-    pinger.start(tokenProvider: () => ref.read(latestFcmTokenProvider));
+    pinger.start(
+      tokenProvider: () => ref.read(latestFcmTokenProvider),
+      routeProvider: () => ref.read(activeRouteProvider),
+    );
   }
 
   void _showBanner(AlertEvent alert) {

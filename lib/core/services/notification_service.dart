@@ -52,8 +52,10 @@ class NotificationService {
     // granted automatically. On iOS it is always a prompt.
     if (settings.authorizationStatus != AuthorizationStatus.authorized &&
         settings.authorizationStatus != AuthorizationStatus.provisional) {
-      debugPrint('Notification permission not granted: '
-          '${settings.authorizationStatus}');
+      debugPrint(
+        'Notification permission not granted: '
+        '${settings.authorizationStatus}',
+      );
       return null;
     }
 

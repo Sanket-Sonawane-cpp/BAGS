@@ -13,6 +13,7 @@ their own thread) without any connection-pooling code to get wrong.
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 import uuid
@@ -29,7 +30,9 @@ CREATE TABLE IF NOT EXISTS cars (
     lat REAL NOT NULL,
     lng REAL NOT NULL,
     fcm_token TEXT,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- JSON [[lat, lng], ...] while the car is navigating, else NULL.
+    route TEXT
 );
 
 CREATE TABLE IF NOT EXISTS detections (
@@ -46,6 +49,10 @@ CREATE TABLE IF NOT EXISTS detections (
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        # Databases created before cars had a route column.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(cars)")}
+        if "route" not in columns:
+            conn.execute("ALTER TABLE cars ADD COLUMN route TEXT")
 
 
 @contextmanager
@@ -79,21 +86,37 @@ def haversine_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> floa
     return 2 * earth_radius_m * math.asin(math.sqrt(a))
 
 
-def upsert_car(car_id: str, lat: float, lng: float, fcm_token: str | None) -> None:
+def upsert_car(
+    car_id: str,
+    lat: float,
+    lng: float,
+    fcm_token: str | None,
+    route: list[tuple[float, float]] | None = None,
+) -> None:
+    """Records a location ping. `route` replaces the stored one every time,
+    so a ping without one (navigation ended) clears it."""
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO cars (car_id, lat, lng, fcm_token, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO cars (car_id, lat, lng, fcm_token, updated_at, route)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(car_id) DO UPDATE SET
                 lat = excluded.lat,
                 lng = excluded.lng,
                 -- A ping with no token (client hasn't got one yet) must not
                 -- erase a token learned from an earlier ping.
                 fcm_token = COALESCE(excluded.fcm_token, cars.fcm_token),
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                route = excluded.route
             """,
-            (car_id, lat, lng, fcm_token, datetime.now(timezone.utc).isoformat()),
+            (
+                car_id,
+                lat,
+                lng,
+                fcm_token,
+                datetime.now(timezone.utc).isoformat(),
+                None if route is None else json.dumps(route),
+            ),
         )
 
 
@@ -117,8 +140,8 @@ def insert_detection(
     return record
 
 
-def nearby_cars_with_token(lat: float, lng: float, radius_m: float) -> list[dict]:
-    """Cars within radius_m that have a token to push to.
+def cars_with_token() -> list[dict]:
+    """Every car that can be pushed to, with its last position and route.
 
     A car with no token yet (hasn't sent a location ping since its FCM
     permission resolved) is silently skipped, not an error — it just can't
@@ -126,21 +149,23 @@ def nearby_cars_with_token(lat: float, lng: float, radius_m: float) -> list[dict
     """
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT car_id, lat, lng, fcm_token FROM cars WHERE fcm_token IS NOT NULL"
+            "SELECT car_id, lat, lng, fcm_token, updated_at, route FROM cars "
+            "WHERE fcm_token IS NOT NULL"
         ).fetchall()
 
-    nearby = []
-    for row in rows:
-        distance = haversine_meters(lat, lng, row["lat"], row["lng"])
-        if distance <= radius_m:
-            nearby.append(
-                {
-                    "car_id": row["car_id"],
-                    "fcm_token": row["fcm_token"],
-                    "distance_m": distance,
-                }
-            )
-    return nearby
+    return [
+        {
+            "car_id": row["car_id"],
+            "lat": row["lat"],
+            "lng": row["lng"],
+            "fcm_token": row["fcm_token"],
+            "updated_at": datetime.fromisoformat(row["updated_at"]),
+            "route": None
+            if row["route"] is None
+            else [tuple(point) for point in json.loads(row["route"])],
+        }
+        for row in rows
+    ]
 
 
 def nearby_detections(lat: float, lng: float, radius_m: float) -> list[dict]:

@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'models/alert_event.dart';
+import 'polyline.dart';
 import 'services/api_service.dart';
 import 'services/location_pinger.dart';
 import 'services/location_service.dart';
@@ -175,6 +177,25 @@ class LatestFcmToken extends Notifier<String?> {
 
 final latestFcmTokenProvider = NotifierProvider<LatestFcmToken, String?>(
   LatestFcmToken.new,
+);
+
+/// The route this car is navigating, thinned for sending, or null when it
+/// isn't. Rides along on location pings so the server can push hazards
+/// reported anywhere ahead on it — not just within its push radius.
+class ActiveRoute extends Notifier<List<LatLng>?> {
+  /// Thinning keeps the road's shape to within this; well inside the
+  /// server's 50 m on-route corridor.
+  static const double toleranceMeters = 10;
+
+  @override
+  List<LatLng>? build() => null;
+
+  void set(List<LatLng>? points) =>
+      state = points == null ? null : simplifyPolyline(points, toleranceMeters);
+}
+
+final activeRouteProvider = NotifierProvider<ActiveRoute, List<LatLng>?>(
+  ActiveRoute.new,
 );
 
 final locationPingerProvider = Provider<LocationPinger>((ref) {

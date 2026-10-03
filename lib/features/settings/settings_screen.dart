@@ -7,6 +7,7 @@ import '../../core/hazards.dart';
 import '../../core/providers.dart';
 import '../../core/services/location_service.dart';
 import '../detection/detection_providers.dart';
+import '../navigation/navigation_providers.dart';
 
 /// Connection, sharing and device details — everything a driver sets once
 /// and a developer checks when something isn't working.
@@ -21,6 +22,7 @@ class SettingsScreen extends ConsumerWidget {
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
         children: const [
           _Section(title: 'Server', child: _ServerCard()),
+          _Section(title: 'Routing', child: _RoutingCard()),
           _Section(title: 'Sharing', child: _SharingCard()),
           _Section(title: 'Location', child: _LocationCard()),
           _Section(title: 'This device', child: _DeviceCard()),
@@ -129,6 +131,76 @@ class _ServerCardState extends ConsumerState<_ServerCard> {
                 child: const Text('Test'),
               ),
               const SizedBox(width: 4),
+              FilledButton.tonal(
+                onPressed: _save,
+                style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),
+                child: const Text('Save'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// OpenRouteService key, which lets routes steer around reported hazards
+/// directly instead of by guesswork detours.
+class _RoutingCard extends ConsumerStatefulWidget {
+  const _RoutingCard();
+
+  @override
+  ConsumerState<_RoutingCard> createState() => _RoutingCardState();
+}
+
+class _RoutingCardState extends ConsumerState<_RoutingCard> {
+  late final TextEditingController _controller = TextEditingController(
+    text: ref.read(orsApiKeyProvider),
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    FocusScope.of(context).unfocus();
+    await ref.read(orsApiKeyProvider.notifier).set(_controller.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasKey = ref.watch(orsApiKeyProvider).isNotEmpty;
+
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            controller: _controller,
+            autocorrect: false,
+            obscureText: true,
+            decoration: const InputDecoration(
+              labelText: 'OpenRouteService API key',
+              hintText: 'Free at openrouteservice.org',
+              prefixIcon: Icon(Icons.key_outlined),
+            ),
+            onSubmitted: (_) => _save(),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              _StatusDot(ok: hasKey),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  hasKey
+                      ? 'Routes avoid reported hazards'
+                      : 'No key: detours are best-effort',
+                ),
+              ),
               FilledButton.tonal(
                 onPressed: _save,
                 style: FilledButton.styleFrom(minimumSize: const Size(0, 40)),

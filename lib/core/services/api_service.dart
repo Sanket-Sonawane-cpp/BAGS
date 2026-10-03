@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:latlong2/latlong.dart';
 
 import '../models/alert_event.dart';
 import '../models/detection_event.dart';
@@ -16,8 +17,9 @@ class ApiException implements Exception {
   final int? statusCode;
 
   @override
-  String toString() => 'ApiException($message${statusCode == null ? '' : ', '
-      'status $statusCode'})';
+  String toString() =>
+      'ApiException($message${statusCode == null ? '' : ', '
+                'status $statusCode'})';
 }
 
 /// Talks to the alert server.
@@ -69,19 +71,34 @@ class ApiService {
   /// next periodic ping with no extra plumbing — see [LocationPinger]. Omit
   /// it (leave null) only before the token is available yet, e.g. while FCM
   /// permission is still being requested on first launch.
+  ///
+  /// [route] is the route being navigated, so the server can push hazards
+  /// reported anywhere ahead on it, not only near the car. Null (not
+  /// navigating) clears the one sent before.
   Future<void> postLocation({
     required String carId,
     required double latitude,
     required double longitude,
     String? fcmToken,
+    List<LatLng>? route,
   }) async {
     await _post('/location', {
       'car_id': carId,
       'lat': latitude,
       'lng': longitude,
       if (fcmToken != null) 'fcm_token': fcmToken,
+      'route': route == null
+          ? null
+          : [
+              // ~1 m precision; more is just bytes on every ping.
+              for (final p in route)
+                [_round5(p.latitude), _round5(p.longitude)],
+            ],
     });
   }
+
+  static double _round5(double value) =>
+      (value * 100000).roundToDouble() / 100000;
 
   /// Obstructions near a point.
   ///
@@ -109,7 +126,10 @@ class ApiService {
     }
 
     if (response.statusCode != 200) {
-      throw ApiException('Failed to fetch alerts', statusCode: response.statusCode);
+      throw ApiException(
+        'Failed to fetch alerts',
+        statusCode: response.statusCode,
+      );
     }
 
     final decoded = jsonDecode(response.body) as List<dynamic>;
