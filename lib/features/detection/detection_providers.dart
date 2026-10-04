@@ -14,15 +14,17 @@ import 'clearance_watcher.dart';
 import 'detection_pipeline.dart';
 import 'inference_service.dart';
 
-/// The ML team's hazard detector: Ultralytics YOLO26n, exported end-to-end
-/// (NMS inside the graph, `[1, 300, 6]` output) with NCHW float32 input.
-/// [InferenceService] reads shape/layout/output kind off the model itself,
-/// so a retrained drop-in only needs the two constants below kept in sync
-/// with its `ml/hazard_detector.metadata.json`.
+/// The ML team's hazard detector: Ultralytics YOLO11n (`ml/model.onnx`,
+/// converted with `tools/convert_to_tflite.py`), float32, NHWC input, raw
+/// detection head (`[1, 8, 8400]`: box + 4 class scores per anchor, no NMS
+/// in the graph). [InferenceService] reads shape/layout/output kind off the
+/// model itself and decodes + NMSes a raw head with [YoloDecoder], so a
+/// retrained drop-in only needs the two constants below kept in sync with
+/// the model's class list and thresholds.
 ///
-/// ~7-8x faster than the YOLO11m it replaced (now `ml/obstruction_detector
-/// .tflite`, out of the app bundle) on the same CPU. Still float32 — an int8 build would be faster again.
-const String modelAsset = 'assets/models/hazard_detector.tflite';
+/// Replaces the YOLO26n (`assets/models/hazard_detector.tflite`, post-NMS
+/// `[1, 300, 6]` output), still bundled to switch back to.
+const String modelAsset = 'assets/models/hazard_detector_yolo11n.tflite';
 
 /// Class order exactly as in the model's metadata (`classes`) — keep in sync
 /// with the ML team's dataset, not guessed independently.
@@ -33,8 +35,10 @@ const List<String> modelLabels = [
   'flood',
 ];
 
-/// Per-class alert thresholds, the metadata's `deploy_conf`: the confidence
-/// at which each class hit the ML team's target precision on their test set.
+/// Per-class alert thresholds: the YOLO26n metadata's `deploy_conf`, the
+/// confidence at which each class hit the ML team's target precision on
+/// their test set. The YOLO11n came without its own metadata, so these are
+/// a stand-in until the ML team publishes its values.
 const Map<String, double> modelClassThresholds = {
   'accident': 0.469,
   'non_accident': 0.406,

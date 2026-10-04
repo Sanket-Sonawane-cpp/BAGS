@@ -351,31 +351,36 @@ class InferenceService {
       inputWidth: _inputWidth,
       inputHeight: _inputHeight,
     );
-    if (detections.isEmpty) return null;
-
-    final best = detections.reduce(
-      (a, b) => b.confidence > a.confidence ? b : a,
-    );
-    return _toResult(best.classIndex, best.confidence);
+    return _pick([
+      for (final d in detections) _toResult(d.classIndex, d.confidence),
+    ]);
   }
 
-  /// Picks one row of `[x1, y1, x2, y2, confidence, classId]`.
-  ///
-  /// Prefers the most confident row that clears its own class's threshold,
-  /// so a 0.3 flood (threshold 0.25) isn't hidden behind a 0.4 accident that
-  /// fails its 0.469. Failing that, returns the most confident row anyway,
-  /// so the dev screen can show what the model sees below threshold.
+  /// Picks one row of `[x1, y1, x2, y2, confidence, classId]` — see [_pick].
   ClassificationResult? _parsePostNms(List<double> values) {
     final rows = _outputShape[1];
     final columns = _outputShape[2];
+    return _pick([
+      for (var row = 0; row < rows; row++)
+        if (values[row * columns + 4] >= minScore)
+          _toResult(
+            values[row * columns + 5].round(),
+            values[row * columns + 4],
+          ),
+    ]);
+  }
+
+  /// The detection to report from one frame's [candidates].
+  ///
+  /// Prefers the most confident one that clears its own class's threshold,
+  /// so a 0.3 flood (threshold 0.25) isn't hidden behind a 0.4 accident that
+  /// fails its 0.469. Failing that, returns the most confident one anyway,
+  /// so the dev screen can show what the model sees below threshold.
+  ClassificationResult? _pick(List<ClassificationResult> candidates) {
     ClassificationResult? best;
     ClassificationResult? bestPassing;
-
-    for (var row = 0; row < rows; row++) {
-      final confidence = values[row * columns + 4];
-      if (confidence < minScore) continue;
-
-      final result = _toResult(values[row * columns + 5].round(), confidence);
+    for (final result in candidates) {
+      final confidence = result.confidence;
       if (best == null || confidence > best.confidence) best = result;
       final threshold = thresholdFor(result.label);
       if (threshold != null &&
