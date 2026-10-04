@@ -6,24 +6,34 @@ import 'package:latlong2/latlong.dart';
 /// [meters] north of the equator on the prime meridian.
 LatLng _north(double meters) => LatLng(meters / 111195, 0);
 
-AlertEvent _hazard({String type = 'accident', double at = 0}) => AlertEvent(
+AlertEvent _hazard({
+  String type = 'accident',
+  double at = 0,
+  List<double> headings = const [],
+}) => AlertEvent(
   id: '$type@$at',
   type: type,
   latitude: _north(at).latitude,
   longitude: 0,
   timestamp: DateTime.utc(2026),
   distanceMeters: 0,
+  headings: headings,
 );
 
 void main() {
   late List<AlertEvent> votes;
+  late List<double?> voteHeadings;
   late ClearanceWatcher watcher;
 
   setUp(() {
     votes = [];
+    voteHeadings = [];
     watcher = ClearanceWatcher(
       detectableTypes: const {'accident', 'flood'},
-      onNotSeen: votes.add,
+      onNotSeen: (hazard, heading) {
+        votes.add(hazard);
+        voteHeadings.add(heading);
+      },
     );
   });
 
@@ -50,6 +60,23 @@ void main() {
     final hazard = _hazard();
     drivePast([hazard]);
     expect(votes, [hazard]);
+    // Driving north.
+    expect(voteHeadings.single, closeTo(0, 1));
+  });
+
+  test('votes on a hazard reported by cars going the same way', () {
+    drivePast([
+      _hazard(headings: const [350, 180]),
+    ]);
+    expect(votes, hasLength(1));
+  });
+
+  test('does not vote on a hazard only seen from the other direction', () {
+    // Maybe on the far carriageway, behind this car's camera.
+    drivePast([
+      _hazard(headings: const [180]),
+    ]);
+    expect(votes, isEmpty);
   });
 
   test('does not vote when the model saw it', () {

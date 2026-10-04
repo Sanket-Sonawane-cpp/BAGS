@@ -9,12 +9,27 @@ import 'routing_service.dart';
 
 /// A reported hazard that lies on a route.
 class HazardOnRoute {
-  const HazardOnRoute(this.hazard, this.alongMeters);
+  const HazardOnRoute(
+    this.hazard,
+    this.alongMeters, {
+    this.sameDirection = true,
+  });
 
   final AlertEvent hazard;
 
   /// How far along the route it is, comparable with [NavUpdate.alongMeters].
   final double alongMeters;
+
+  /// Whether it was reported by a car going the same way as the route there
+  /// (or nobody's direction is known). If not, it was only seen from the
+  /// other direction, and may be on the far side of a divided road.
+  final bool sameDirection;
+
+  /// Whether to drive a different way to avoid it: [worthAvoiding], and
+  /// reported from this route's direction. On an undivided road a hazard
+  /// seen only by oncoming cars may still be in this lane, so it stays on
+  /// the route as a warning rather than being ignored.
+  bool get blocksThisRoute => sameDirection && worthAvoiding(hazard);
 }
 
 /// Hazards within [corridorMeters] of the route line, in the order the route
@@ -31,9 +46,19 @@ List<HazardOnRoute> hazardsOnRoute(
   final found = <HazardOnRoute>[];
   for (final hazard in hazards) {
     final at = progress.project(LatLng(hazard.latitude, hazard.longitude));
-    if (at.offRouteMeters <= corridorMeters) {
-      found.add(HazardOnRoute(hazard, at.alongMeters));
-    }
+    if (at.offRouteMeters > corridorMeters) continue;
+    // Anywhere near it, so a hazard right at a turn counts for the road
+    // the route approaches it on.
+    final directions = progress.directionsAround(at.alongMeters);
+    found.add(
+      HazardOnRoute(
+        hazard,
+        at.alongMeters,
+        sameDirection:
+            hazard.headings.isEmpty ||
+            directions.any((d) => sameWay(d, hazard.headings)),
+      ),
+    );
   }
   found.sort((a, b) => a.alongMeters.compareTo(b.alongMeters));
   return found;
@@ -58,17 +83,21 @@ class PlannedRoute {
 
 /// Picks a driving route that avoids road-blocking hazards where it can.
 ///
-/// Only confirmed hazards that block the road ([worthAvoiding]) are
-/// avoided; the rest, like potholes or a single unconfirmed report, stay on
+/// Only confirmed hazards that block the road on the route's side
+/// ([HazardOnRoute.blocksThisRoute]) are avoided; the rest, like potholes,
+/// a single unconfirmed report, or one only seen by oncoming cars, stay on
 /// the route as warnings.
 ///
-/// With OpenRouteService ([RoutingService.canAvoid]) that's one request:
-/// route around every blocking hazard at once. The public OSRM server can't
-/// be told "avoid this point", so without it this works with what it can
-/// do: first ask for alternative routes, and if all of them pass a hazard,
-/// force detours through a point beside the first one. Requests go one at a
-/// time and stop at the first clean route, keeping load on the shared demo
-/// server low.
+/// With OpenRouteService ([RoutingService.canAvoid]) that's usually one
+/// request: route around the blocking hazards at once. Its avoid areas
+/// close a road both ways, so only hazards blocking the route's side go in,
+/// with more added if the way around runs into them.
+///
+/// The public OSRM server can't be told "avoid this point", so without it
+/// this works with what it can do: first ask for alternative routes, and if
+/// all of them pass a hazard, force detours through a point beside the
+/// first one. Requests go one at a time and stop at the first clean route,
+/// keeping load on the shared demo server low.
 class HazardRoutePlanner {
   const HazardRoutePlanner(this._routing);
 
@@ -81,6 +110,10 @@ class HazardRoutePlanner {
 
   /// How far to the side of a hazard detour points go, tried in order.
   static const List<double> _detourOffsetsMeters = [400, 1000];
+
+  /// The most avoid requests per plan, each adding the hazards the last way
+  /// around ran into.
+  static const int _maxAvoidRounds = 3;
 
   Future<PlannedRoute> plan(
     LatLng from,
@@ -102,7 +135,11 @@ class HazardRoutePlanner {
       alternatives: !_routing.canAvoid,
     );
     final fastest = candidates.first;
-    final blockingFastest = hazardsOnRoute(fastest, avoidable);
+    List<HazardOnRoute> blockingOn(NavRoute route) => [
+      for (final h in hazardsOnRoute(route, avoidable))
+        if (h.sameDirection) h,
+    ];
+    final blockingFastest = blockingOn(fastest);
 
     PlannedRoute result(NavRoute route, List<HazardOnRoute> blocking) =>
         PlannedRoute(
@@ -117,7 +154,7 @@ class HazardRoutePlanner {
     var best = fastest;
     var bestBlocking = blockingFastest;
     void consider(NavRoute route) {
-      final blocking = hazardsOnRoute(route, avoidable);
+      final blocking = blockingOn(route);
       if (blocking.length < bestBlocking.length ||
           (blocking.length == bestBlocking.length &&
               route.durationSeconds < best.durationSeconds)) {
@@ -127,16 +164,27 @@ class HazardRoutePlanner {
     }
 
     if (_routing.canAvoid) {
-      try {
-        final around = await _routing.routes(
-          from,
-          to,
-          avoid: [for (final h in avoidable) _point(h)],
-        );
-        consider(around.first);
-      } on Exception {
-        // No way around them all (e.g. the only bridge is blocked): keep
-        // the fastest route, with the hazards on it flagged.
+      final avoid = {for (final h in blockingFastest) h.hazard};
+      for (var round = 0; round < _maxAvoidRounds; round++) {
+        final NavRoute around;
+        try {
+          around = (await _routing.routes(
+            from,
+            to,
+            avoid: [for (final h in avoid) _point(h)],
+          )).first;
+        } on Exception {
+          // No way around them all (e.g. the only bridge is blocked): keep
+          // the best so far, with the hazards on it flagged.
+          break;
+        }
+        consider(around);
+        final more = [
+          for (final h in blockingOn(around))
+            if (!avoid.contains(h.hazard)) h.hazard,
+        ];
+        if (more.isEmpty) break;
+        avoid.addAll(more);
       }
       return result(best, bestBlocking);
     }

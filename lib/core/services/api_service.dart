@@ -101,10 +101,19 @@ class ApiService {
   /// detection running and didn't see it: a vote that it's gone. A few such
   /// votes from different cars, with no new sighting, remove it.
   ///
+  /// [heading] is which way the car was going past it, if known; the server
+  /// ignores a vote from a car going the other way from everyone who saw
+  /// it, which may have been facing away from it.
+  ///
   /// Throws [ApiException] (status 404) if the hazard is already gone.
-  Future<void> postNotSeen(String hazardId, {required String carId}) async {
+  Future<void> postNotSeen(
+    String hazardId, {
+    required String carId,
+    double? heading,
+  }) async {
     await _post('/hazards/${Uri.encodeComponent(hazardId)}/not-seen', {
       'car_id': carId,
+      'heading': ?heading,
     });
   }
 

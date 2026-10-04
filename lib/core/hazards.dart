@@ -88,6 +88,22 @@ HazardStyle hazardStyle(String type) =>
 bool worthAvoiding(AlertEvent hazard) =>
     hazard.confirmed && hazardStyle(hazard.type).blocksRoad;
 
+/// Cars travelling within this many degrees of each other are going the
+/// same way down a road. Generous, because GPS bearings and bends in the
+/// road both wander. Keep in sync with SAME_WAY_DEGREES in
+/// server/hazards.py.
+const double sameWayDegrees = 60;
+
+/// The smaller angle between two compass directions, 0–180 degrees.
+double angleBetween(double a, double b) => ((a - b + 180) % 360 - 180).abs();
+
+/// Whether travelling [direction] is going the same way as any of
+/// [headings] ([AlertEvent.headings]). True when none are known: then
+/// every car may have seen it.
+bool sameWay(double direction, List<double> headings) =>
+    headings.isEmpty ||
+    headings.any((h) => angleBetween(direction, h) <= sameWayDegrees);
+
 /// Renders a distance the way a driver reads a road sign.
 ///
 /// Metre precision is noise at speed, so anything past 1 km is shown in

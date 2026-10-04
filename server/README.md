@@ -35,10 +35,10 @@ phone needs to reach your machine over the LAN; find the IP with `ipconfig`
 
 | | |
 |---|---|
-| `POST /detection` | `{type, confidence, lat, lng, timestamp, car_id?}` — records a sighting of a hazard (see below). Pushes the hazard to nearby cars (within 2km) when it's first reported, and again when it becomes confirmed; confirmed hazards also go to cars navigating a route that passes them |
+| `POST /detection` | `{type, confidence, lat, lng, timestamp, car_id?, heading?}` — records a sighting of a hazard (see below). Pushes the hazard to nearby cars (within 2km) when it's first reported, and again when it becomes confirmed; confirmed hazards also go to cars navigating a route that passes them |
 | `POST /location` | `{car_id, lat, lng, fcm_token?, route?}` — a car's periodic "here is where I am" ping. `fcm_token` rides along here rather than a separate endpoint, so a token refresh reaches the server on the next ping automatically |
-| `GET /alerts?lat&lng&radius_m` | Live hazards nearby, most recently seen first: `{id, type, lat, lng, timestamp, confirmed, reports, distance_m}`. Same shape push delivers. The app syncs with this, which is how it learns a hazard is gone |
-| `POST /hazards/{id}/not-seen` | `{car_id}` — the car drove past the hazard with detection running and didn't see it. 404 if the hazard is already gone |
+| `GET /alerts?lat&lng&radius_m` | Live hazards nearby, most recently seen first: `{id, type, lat, lng, timestamp, confirmed, reports, headings, distance_m}`. Same shape push delivers. The app syncs with this, which is how it learns a hazard is gone |
+| `POST /hazards/{id}/not-seen` | `{car_id, heading?}` — the car drove past the hazard with detection running and didn't see it. `status` is `noted`, `cleared`, or `ignored` (going the other way from everyone who saw it). 404 if the hazard is already gone |
 | `GET /health` | `{status, fcm_ready, hazards, detections, cars}` — `fcm_ready` is false until the service account key exists |
 | `POST /reset` | Clears every hazard and car, for starting a test run from a known state |
 
@@ -61,6 +61,18 @@ Rules and their numbers are in `hazards.py`.
   seeing it, and nobody has seen it since. The app sends those votes by
   itself (`lib/features/detection/clearance_watcher.dart`), only for types
   its model can detect.
+- **Direction.** `heading` is the car's direction of travel, in degrees
+  clockwise from north (sent while it's moving). Each hazard lists the
+  directions its reporters were going (`headings`). The camera faces
+  forward, so a hazard seen only by cars going one way may be on the far
+  carriageway of a divided road. For a car going the other way it:
+  - doesn't reroute it (it's still shown as a warning, since on an
+    undivided road it may be in its lane),
+  - isn't pushed to it as a hazard far ahead on its route,
+  - can't be voted away by it (its camera may have faced away).
+
+  Within 60° counts as the same way. Hazards with no known direction count
+  for everyone, as before.
 
 ## Tests
 

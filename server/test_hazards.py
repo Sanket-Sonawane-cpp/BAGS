@@ -17,10 +17,12 @@ from pathlib import Path
 from unittest import mock
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 import app
 import db
 import fcm
+import routes
 
 # ~0.0001° of latitude is 11 m.
 HERE = (18.5, 73.8)
@@ -58,6 +60,7 @@ class HazardTest(unittest.TestCase):
         type_: str = "accident",
         at: tuple[float, float] = HERE,
         confidence: float = 0.6,
+        heading: float | None = None,
     ) -> dict:
         return app.post_detection(
             app.DetectionIn(
@@ -67,6 +70,7 @@ class HazardTest(unittest.TestCase):
                 lng=at[1],
                 timestamp=self.now,
                 car_id=car,
+                heading=heading,
             )
         )
 
@@ -209,6 +213,65 @@ class NotSeenTest(HazardTest):
         with self.assertRaises(HTTPException) as raised:
             self.not_seen("nope", "b")
         self.assertEqual(raised.exception.status_code, 404)
+
+
+class DirectionTest(HazardTest):
+    def not_seen(self, hazard_id: str, car: str, heading=None) -> str:
+        return app.post_not_seen(
+            hazard_id, app.NotSeenIn(car_id=car, heading=heading)
+        )["status"]
+
+    def test_each_reporters_latest_direction_is_listed(self) -> None:
+        self.report("a", heading=0)
+        self.report("a", heading=10.4)
+        self.report("b", heading=180)
+        self.report("c")  # standing still: direction unknown
+        [alert] = self.alerts()
+        self.assertEqual(alert["headings"], [10, 180])
+        self.assertEqual(alert["reports"], 3)
+
+    def test_a_vote_from_the_other_direction_is_ignored(self) -> None:
+        hazard = self.report("a", heading=0)["id"]
+        self.later(minutes=1)
+
+        self.assertEqual(self.not_seen(hazard, "b", heading=180), "ignored")
+        self.assertEqual(self.not_seen(hazard, "c", heading=90), "ignored")
+        self.assertEqual(self.not_seen(hazard, "d", heading=350), "noted")
+        self.assertEqual(self.not_seen(hazard, "e"), "cleared")  # unknown: counts
+
+    def test_with_no_known_direction_any_vote_counts(self) -> None:
+        hazard = self.report("a")["id"]
+        self.later(minutes=1)
+        self.assertEqual(self.not_seen(hazard, "b", heading=180), "noted")
+
+    def test_route_pushes_go_only_to_cars_going_the_reported_way(self) -> None:
+        # Driving north towards both hazards from 5 km south.
+        start = (HERE[0] - 0.045, HERE[1])
+        self.car("driver", at=start, route=[start, _north(1000)])
+
+        # Seen by cars heading south: maybe the far carriageway.
+        for car in ("a", "b"):
+            self.report(car, heading=180)
+        self.assertEqual(self.pushes, [])
+
+        # Seen by cars heading north, like the driver.
+        for car in ("a", "b"):
+            self.report(car, at=_north(500), heading=2)
+        [(token, alert)] = self.pushes
+        self.assertEqual((token, alert["headings"]), ("token-driver", [2]))
+
+    def test_a_hazard_at_a_corner_counts_for_the_approach(self) -> None:
+        # North, then a right turn east at HERE; reported by a car going
+        # north into the corner.
+        start = (HERE[0] - 0.01, HERE[1])
+        route = [start, HERE, (HERE[0], HERE[1] + 0.01)]
+        corner = (HERE[0], HERE[1] + 0.0002)  # just past the turn
+        self.assertIsNotNone(routes.distance_ahead(route, start, corner, headings=[0]))
+        self.assertIsNone(routes.distance_ahead(route, start, corner, headings=[180]))
+
+    def test_directions_must_be_compass_degrees(self) -> None:
+        with self.assertRaises(ValidationError):
+            app.NotSeenIn(car_id="a", heading=400)
 
 
 class MigrationTest(HazardTest):

@@ -13,6 +13,7 @@ class AlertEvent {
     required this.distanceMeters,
     this.confirmed = true,
     this.reports = 1,
+    this.headings = const [],
   });
 
   /// Builds an alert from an FCM data payload.
@@ -30,6 +31,7 @@ class AlertEvent {
     // Absent from servers that predate confirmation: trusted, as before.
     confirmed: json['confirmed']?.toString() != 'false',
     reports: json['reports'] == null ? 1 : _toDouble(json['reports']).round(),
+    headings: _toDoubles(json['headings']),
   );
 
   /// Server-assigned id, used to avoid showing the same alert twice.
@@ -56,8 +58,25 @@ class AlertEvent {
   /// How many different cars reported it.
   final int reports;
 
+  /// Which ways the cars that reported it were travelling, in degrees
+  /// clockwise from north; empty when unknown. Seen only by cars going one
+  /// way, it may be on the far side of a divided road for cars going the
+  /// other — see [sameWay].
+  final List<double> headings;
+
   static double _toDouble(Object? value) =>
       value is num ? value.toDouble() : double.parse(value.toString());
+
+  /// A JSON list, or FCM's comma-separated string (data values can't be
+  /// lists).
+  static List<double> _toDoubles(Object? value) => switch (value) {
+    null => const [],
+    final List<dynamic> list => [for (final v in list) _toDouble(v)],
+    _ => [
+      for (final part in value.toString().split(','))
+        if (part.trim().isNotEmpty) double.parse(part),
+    ],
+  };
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -68,6 +87,7 @@ class AlertEvent {
     'distance_m': distanceMeters,
     'confirmed': confirmed,
     'reports': reports,
+    'headings': headings,
   };
 
   @override

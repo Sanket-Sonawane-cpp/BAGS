@@ -51,9 +51,32 @@ CONFIRM_CONFIDENCE = 0.8
 # new sighting since, means it's gone.
 CLEAR_VOTES = 2
 
+# Cars travelling within this of each other (degrees) are going the same
+# way down a road. Each sighting keeps the reporting car's direction of
+# travel: the camera faces forward, so a hazard seen by cars going one way
+# may be on the far carriageway of a divided road for cars going the other.
+# Generous, because a car's GPS bearing and a road's bend both wander. Keep
+# in sync with sameWayDegrees in lib/core/hazards.dart.
+SAME_WAY_DEGREES = 60
+
 
 def lifetime(type_: str) -> timedelta:
     return LIFETIMES.get(type_, DEFAULT_LIFETIME)
+
+
+def angle_between(a: float, b: float) -> float:
+    """The smaller angle between two compass directions, 0-180 degrees."""
+    return abs((a - b + 180) % 360 - 180)
+
+
+def same_way(heading: float, headings) -> bool:
+    """Whether a car travelling `heading` is going the same way as any of
+    `headings`. True when there are none: with no directions known, every
+    car may have seen it."""
+    headings = list(headings)
+    return not headings or any(
+        angle_between(heading, h) <= SAME_WAY_DEGREES for h in headings
+    )
 
 
 def is_confirmed(reporters: int, confidence: float) -> bool:

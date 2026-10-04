@@ -73,6 +73,12 @@ class DetectionPipeline {
   /// the last known one.
   static const Duration _positionTimeout = Duration(seconds: 2);
 
+  /// Below this speed (m/s, ~7 km/h) a GPS bearing is noise.
+  static const double _minHeadingSpeed = 2;
+
+  /// A bearing the GPS itself rates worse than this (degrees) is ignored.
+  static const double _maxHeadingError = 45;
+
   DateTime? _lastRun;
   bool _busy = false;
   Position? _lastPosition;
@@ -194,6 +200,7 @@ class DetectionPipeline {
           latitude: position.latitude,
           longitude: position.longitude,
           timestamp: seenAt,
+          heading: _headingOf(position),
         ),
       );
     } catch (error, stackTrace) {
@@ -202,6 +209,21 @@ class DetectionPipeline {
       // ignore: avoid_catches_without_on_clauses
       if (!_rawResults.isClosed) _rawResults.addError(error, stackTrace);
     }
+  }
+
+  /// Which way the car is going, if [position] says reliably. Android
+  /// reports 0 for an unknown bearing and accuracy, iOS -1, so a bearing
+  /// only counts while moving.
+  static double? _headingOf(Position position) {
+    final heading = position.heading;
+    if (position.speed < _minHeadingSpeed ||
+        !heading.isFinite ||
+        heading < 0 ||
+        heading > 360 ||
+        position.headingAccuracy > _maxHeadingError) {
+      return null;
+    }
+    return heading % 360;
   }
 
   Future<Position?> _currentPositionOrNull() async {

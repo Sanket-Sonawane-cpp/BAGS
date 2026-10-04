@@ -93,6 +93,8 @@ def send_alert(token: str, alert: dict) -> bool:
             "timestamp": str(alert["timestamp"]),
             "confirmed": "true" if alert.get("confirmed", True) else "false",
             "reports": str(alert.get("reports", 1)),
+            # Comma-separated: data values can't be lists.
+            "headings": ",".join(str(h) for h in alert.get("headings", [])),
             "distance_m": str(alert["distance_m"]),
         },
         **_visible_notification(alert),

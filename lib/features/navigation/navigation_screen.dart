@@ -408,7 +408,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   }
 
   static Iterable<AlertEvent> _avoidable(Iterable<HazardOnRoute> onRoute) =>
-      onRoute.map((h) => h.hazard).where(worthAvoiding);
+      onRoute.where((h) => h.blocksThisRoute).map((h) => h.hazard);
 
   /// Keeps [_onRoute] current, and while navigating offers a way around a
   /// hazard newly reported (or newly confirmed) on the road ahead, or the
@@ -434,7 +434,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     final fresh = onRoute
         .where(
           (h) =>
-              worthAvoiding(h.hazard) &&
+              h.blocksThisRoute &&
               h.alongMeters > along &&
               distance(me, LatLng(h.hazard.latitude, h.hazard.longitude)) >
                   HazardRoutePlanner.endpointClearanceMeters &&
@@ -471,7 +471,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     if (!mounted || !_navigating || request != _offerRequest) return;
 
     final label = hazardStyle(hazard.type).label;
-    if (plan.onRoute.any((h) => _sameHazard(h.hazard, hazard))) {
+    if (plan.onRoute.any(
+      (h) => h.blocksThisRoute && _sameHazard(h.hazard, hazard),
+    )) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$label reported ahead — no way around it')),
       );
@@ -782,9 +784,9 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
               ),
             if (route != null && !_routing && warnings > 0)
               _Note(
-                '$warnings minor or unconfirmed '
+                '$warnings reported '
                 '${warnings == 1 ? 'hazard' : 'hazards'}'
-                ' on the way — drive carefully',
+                ' on the way, not worth a detour — drive carefully',
               ),
             if (_routing)
               const Padding(
@@ -860,6 +862,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
               _HazardAhead(
                 hazard: hazardAhead.hazard,
                 inMeters: hazardAhead.alongMeters - update.alongMeters,
+                sameDirection: hazardAhead.sameDirection,
               ),
             if (_error != null) _Note(_error!, error: true),
             const Divider(height: 20),
@@ -1011,10 +1014,17 @@ class _HazardDot extends StatelessWidget {
 /// "Accident in 600 m" under the next maneuver, for a hazard that couldn't
 /// be routed around.
 class _HazardAhead extends StatelessWidget {
-  const _HazardAhead({required this.hazard, required this.inMeters});
+  const _HazardAhead({
+    required this.hazard,
+    required this.inMeters,
+    required this.sameDirection,
+  });
 
   final AlertEvent hazard;
   final double inMeters;
+
+  /// False when only cars coming the other way reported it.
+  final bool sameDirection;
 
   @override
   Widget build(BuildContext context) {
@@ -1027,7 +1037,8 @@ class _HazardAhead extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              '${style.label} in ${_formatLength(inMeters)}',
+              '${style.label} in ${_formatLength(inMeters)}'
+              '${sameDirection ? '' : ' · seen by oncoming traffic'}',
               style: Theme.of(context).textTheme.titleSmall,
             ),
           ),

@@ -173,6 +173,29 @@ class RouteProgress {
     );
   }
 
+  /// The route's direction of travel, in degrees clockwise from north, on
+  /// each segment within [windowMeters] either side of [alongMeters] — the
+  /// way a car following it goes there. More than one around a turn.
+  List<double> directionsAround(
+    double alongMeters, {
+    double windowMeters = 30,
+  }) {
+    final points = route.points;
+    return [
+      for (var i = 0; i < points.length - 1; i++)
+        if (_cumulative[i + 1] >= alongMeters - windowMeters &&
+            _cumulative[i] <= alongMeters + windowMeters &&
+            _cumulative[i + 1] > _cumulative[i])
+          _direction(points[i], points[i + 1]),
+    ];
+  }
+
+  static double _direction(LatLng a, LatLng b) {
+    final east = (b.longitude - a.longitude) * math.cos(a.latitudeInRad);
+    final north = b.latitude - a.latitude;
+    return (math.atan2(east, north) * 180 / math.pi) % 360;
+  }
+
   int _nearestVertex(LatLng target, int from) {
     var best = from;
     var bestDistance = double.infinity;

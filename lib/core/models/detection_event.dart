@@ -10,6 +10,7 @@ class DetectionEvent {
     required this.latitude,
     required this.longitude,
     required this.timestamp,
+    this.heading,
   });
 
   factory DetectionEvent.fromJson(Map<String, dynamic> json) => DetectionEvent(
@@ -18,6 +19,7 @@ class DetectionEvent {
     latitude: (json['lat'] as num).toDouble(),
     longitude: (json['lng'] as num).toDouble(),
     timestamp: DateTime.parse(json['timestamp'] as String).toUtc(),
+    heading: (json['heading'] as num?)?.toDouble(),
   );
 
   /// Obstruction class predicted by the model, e.g. 'pothole' or 'debris'.
@@ -36,6 +38,12 @@ class DetectionEvent {
   /// When the detection happened, always in UTC.
   final DateTime timestamp;
 
+  /// Which way the car was travelling, in degrees clockwise from north, or
+  /// null when unknown (standing still, no GPS bearing). The camera faces
+  /// forward, so this says which side of a divided road the hazard was
+  /// seen from.
+  final double? heading;
+
   /// Keys are snake_case to match the FastAPI server.
   Map<String, dynamic> toJson() => {
     'type': type,
@@ -43,6 +51,7 @@ class DetectionEvent {
     'lat': latitude,
     'lng': longitude,
     'timestamp': timestamp.toUtc().toIso8601String(),
+    'heading': ?heading,
   };
 
   @override

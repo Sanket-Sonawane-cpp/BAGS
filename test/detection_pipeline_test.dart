@@ -63,6 +63,19 @@ class _FakeInference extends InferenceService {
   Future<void> dispose() async {}
 }
 
+Position _fix({double speed = 0, double heading = 0}) => Position(
+  latitude: 18.5,
+  longitude: 73.8,
+  timestamp: DateTime.utc(2026),
+  accuracy: 5,
+  altitude: 0,
+  altitudeAccuracy: 0,
+  heading: heading,
+  headingAccuracy: 0,
+  speed: speed,
+  speedAccuracy: 0,
+);
+
 /// A GPS that takes until the test says to produce a fix.
 class _SlowLocation extends LocationService {
   final fix = Completer<Position>();
@@ -79,10 +92,15 @@ class _SlowLocation extends LocationService {
 }
 
 void main() {
-  test('keeps checking frames while a detection waits for GPS', () async {
-    final camera = _FakeCamera();
-    final inference = _FakeInference();
-    final location = _SlowLocation();
+  late _FakeCamera camera;
+  late _FakeInference inference;
+  late _SlowLocation location;
+  late List<DetectionEvent> detections;
+
+  setUp(() async {
+    camera = _FakeCamera();
+    inference = _FakeInference();
+    location = _SlowLocation();
     final pipeline = DetectionPipeline(
       inferenceService: inference,
       cameraService: camera,
@@ -90,10 +108,12 @@ void main() {
       minInterval: Duration.zero,
     );
     addTearDown(pipeline.dispose);
-    final detections = <DetectionEvent>[];
+    detections = [];
     pipeline.detections.listen(detections.add);
     await pipeline.start();
+  });
 
+  test('keeps checking frames while a detection waits for GPS', () async {
     for (var i = 0; i < 3; i++) {
       camera.sendFrame(_Frame());
       await pumpEventQueue();
@@ -104,22 +124,23 @@ void main() {
     expect(location.lookups, 1);
     expect(detections, isEmpty);
 
-    location.fix.complete(
-      Position(
-        latitude: 18.5,
-        longitude: 73.8,
-        timestamp: DateTime.utc(2026),
-        accuracy: 5,
-        altitude: 0,
-        altitudeAccuracy: 0,
-        heading: 0,
-        headingAccuracy: 0,
-        speed: 0,
-        speedAccuracy: 0,
-      ),
-    );
+    location.fix.complete(_fix());
     await pumpEventQueue();
     expect(detections, hasLength(3));
     expect(detections.every((d) => d.latitude == 18.5), isTrue);
+  });
+
+  test('tags a detection with which way the car is going', () async {
+    camera.sendFrame(_Frame());
+    location.fix.complete(_fix(speed: 12, heading: 271.5));
+    await pumpEventQueue();
+    expect(detections.single.heading, 271.5);
+  });
+
+  test('leaves the direction out when standing still', () async {
+    camera.sendFrame(_Frame());
+    location.fix.complete(_fix(speed: 0.5, heading: 90));
+    await pumpEventQueue();
+    expect(detections.single.heading, isNull);
   });
 }

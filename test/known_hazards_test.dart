@@ -153,6 +153,23 @@ void main() {
       final alert = AlertEvent.fromJson(json());
       expect(alert.confirmed, isTrue);
       expect(alert.reports, 1);
+      expect(alert.headings, isEmpty);
+    });
+
+    test('reads directions as FCM and /alerts send them', () {
+      expect(AlertEvent.fromJson(json({'headings': '90,270'})).headings, [
+        90,
+        270,
+      ]);
+      expect(AlertEvent.fromJson(json({'headings': ''})).headings, isEmpty);
+      expect(
+        AlertEvent.fromJson(
+          json({
+            'headings': [10, 20.5],
+          }),
+        ).headings,
+        [10, 20.5],
+      );
     });
   });
 }

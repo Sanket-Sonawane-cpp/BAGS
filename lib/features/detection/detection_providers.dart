@@ -121,12 +121,16 @@ final detectionHistoryProvider =
 /// while detection runs, and only with reporting on: a vote is a report
 /// too. Watched from HomeShell, so it runs whichever tab is showing.
 final clearanceWatcherProvider = Provider<ClearanceWatcher>((ref) {
-  Future<void> vote(AlertEvent hazard) async {
+  Future<void> vote(AlertEvent hazard, double? heading) async {
     if (!ref.read(reportDetectionsProvider)) return;
     try {
       await ref
           .read(apiServiceProvider)
-          .postNotSeen(hazard.id, carId: ref.read(carIdProvider));
+          .postNotSeen(
+            hazard.id,
+            carId: ref.read(carIdProvider),
+            heading: heading,
+          );
     } on ApiException {
       // Offline, or the hazard is already gone: nothing worth retrying.
     }
@@ -137,7 +141,7 @@ final clearanceWatcherProvider = Provider<ClearanceWatcher>((ref) {
       for (final label in modelLabels)
         if (hazardStyle(label).isHazard) label,
     },
-    onNotSeen: (hazard) => unawaited(vote(hazard)),
+    onNotSeen: (hazard, heading) => unawaited(vote(hazard, heading)),
   );
 
   // Fixes only while detecting: a pass with the camera off proves nothing.

@@ -86,6 +86,8 @@ class DetectionIn(BaseModel):
     # The reporting car, so it isn't pushed its own detection. Optional so
     # older app builds that don't send it still get recorded.
     car_id: str | None = None
+    # Its direction of travel, degrees clockwise from north, when known.
+    heading: float | None = Field(default=None, ge=0, le=360)
 
 
 class LocationIn(BaseModel):
@@ -111,6 +113,8 @@ class NotSeenIn(BaseModel):
     """A car drove past a hazard with detection running and didn't see it."""
 
     car_id: str
+    # Its direction of travel past it, when known.
+    heading: float | None = Field(default=None, ge=0, le=360)
 
 
 @app.get("/health")
@@ -134,6 +138,7 @@ def post_detection(event: DetectionIn) -> dict:
         event.lng,
         event.timestamp,
         event.car_id,
+        event.heading,
     )
     hazard = outcome["hazard"]
     logger.info(
@@ -189,6 +194,7 @@ def _alert(hazard: dict, distance_m: float) -> dict:
         "timestamp": hazard["last_seen"].isoformat(),
         "confirmed": hazard["confirmed"],
         "reports": hazard["reports"],
+        "headings": hazard["headings"],
         "distance_m": round(distance_m, 1),
     }
 
@@ -198,8 +204,8 @@ def _alert_distance(car: dict, hazard: dict) -> float | None:
 
     Within ALERT_RADIUS_M: the straight-line distance. Further away, only if
     the hazard is confirmed (only those reroute cars) and the car is
-    navigating a route that reaches it: the distance along that route. None
-    otherwise.
+    navigating a route that reaches it, going the same way as someone who
+    reported it: the distance along that route. None otherwise.
     """
     lat, lng = hazard["lat"], hazard["lng"]
     straight = db.haversine_meters(lat, lng, car["lat"], car["lng"])
@@ -211,7 +217,9 @@ def _alert_distance(car: dict, hazard: dict) -> float | None:
     fresh = datetime.now(timezone.utc) - car["updated_at"] <= ROUTE_FRESHNESS
     if not route or not fresh:
         return None
-    return routes.distance_ahead(route, (car["lat"], car["lng"]), (lat, lng))
+    return routes.distance_ahead(
+        route, (car["lat"], car["lng"]), (lat, lng), headings=hazard["headings"]
+    )
 
 
 @app.post("/location")
@@ -248,8 +256,9 @@ def get_alerts(lat: float, lng: float, radius_m: float = ALERT_RADIUS_M) -> list
 def post_not_seen(hazard_id: str, report: NotSeenIn) -> dict:
     """A car drove past a hazard, detecting, without seeing it. Enough of
     these with no new sighting (hazards.CLEAR_VOTES) delete the hazard;
-    apps drop it at their next sync."""
-    status = db.record_not_seen(hazard_id, report.car_id)
+    apps drop it at their next sync. A car going the other way from every
+    reporter is "ignored": it may have been facing away from it."""
+    status = db.record_not_seen(hazard_id, report.car_id, report.heading)
     if status is None:
         raise HTTPException(404, "No such hazard (cleared or expired)")
     logger.info("[not seen] hazard %s by %s: %s", hazard_id[:8], report.car_id, status)

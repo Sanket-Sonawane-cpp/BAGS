@@ -32,13 +32,19 @@ NavRoute _straight(List<LatLng> points, {double duration = 200}) => NavRoute(
   durationSeconds: duration,
 );
 
-AlertEvent _hazard(String id, double lat, double lng) => AlertEvent(
+AlertEvent _hazard(
+  String id,
+  double lat,
+  double lng, {
+  List<double> headings = const [],
+}) => AlertEvent(
   id: id,
   type: 'accident',
   latitude: lat,
   longitude: lng,
   timestamp: DateTime.utc(2026),
   distanceMeters: 0,
+  headings: headings,
 );
 
 const _from = LatLng(0, 0);
@@ -50,6 +56,14 @@ final _eastward = _straight(const [
   _from,
   LatLng(0.005, 0.01),
   LatLng(0.015, 0.01),
+  _to,
+], duration: 300);
+
+/// The mirror image of [_eastward].
+final _westward = _straight(const [
+  _from,
+  LatLng(0.005, -0.01),
+  LatLng(0.015, -0.01),
   _to,
 ], duration: 300);
 
@@ -103,6 +117,31 @@ class _FakeAvoidingRouting extends RoutingService {
   }
 }
 
+/// Like OpenRouteService, answering each avoid request with the next of
+/// [answers].
+class _ScriptedAvoidingRouting extends RoutingService {
+  _ScriptedAvoidingRouting(this.answers);
+
+  final List<NavRoute> answers;
+  final List<List<LatLng>> avoidRequests = [];
+
+  @override
+  bool get canAvoid => true;
+
+  @override
+  Future<List<NavRoute>> routes(
+    LatLng from,
+    LatLng to, {
+    List<LatLng> via = const [],
+    bool alternatives = false,
+    List<LatLng> avoid = const [],
+  }) async {
+    if (avoid.isEmpty) return [_direct];
+    avoidRequests.add(avoid);
+    return [answers[avoidRequests.length - 1]];
+  }
+}
+
 void main() {
   group('RouteProgress.project', () {
     test('places a point beside the route by distance along it', () {
@@ -121,6 +160,41 @@ void main() {
         _hazard('early', 0.005, -0.0001),
       ]);
       expect(found.map((h) => h.hazard.id), ['early', 'late']);
+    });
+
+    test('knows which ones were reported going the same way', () {
+      final found = hazardsOnRoute(_direct, [
+        _hazard('unknown', 0.004, 0),
+        _hazard('northbound', 0.008, 0, headings: const [20]),
+        _hazard('both ways', 0.012, 0, headings: const [180, 355]),
+        _hazard('southbound', 0.016, 0, headings: const [180]),
+      ]);
+      expect(
+        {for (final h in found) h.hazard.id: h.sameDirection},
+        {
+          'unknown': true,
+          'northbound': true,
+          'both ways': true,
+          'southbound': false,
+        },
+      );
+    });
+
+    test('a hazard just past a turn counts for the road leading to it', () {
+      // North, then right (east) at 0.01.
+      final turning = _straight(const [
+        _from,
+        LatLng(0.01, 0),
+        LatLng(0.01, 0.01),
+      ]);
+      final found = hazardsOnRoute(turning, [
+        _hazard('approach', 0.01, 0.0002, headings: const [0]),
+        _hazard('opposite', 0.01, 0.0002, headings: const [180]),
+      ]);
+      expect(
+        {for (final h in found) h.hazard.id: h.sameDirection},
+        {'approach': true, 'opposite': false},
+      );
     });
   });
 
@@ -208,13 +282,33 @@ void main() {
       expect(plan.onRoute.single.hazard.id, 'maybe');
     });
 
-    test('asks a routing engine that can avoid areas to avoid them', () async {
+    test('asks a routing engine that can avoid areas to avoid the ones on '
+        'the route', () async {
       final routing = _FakeAvoidingRouting(around: _eastward);
       final plan = await HazardRoutePlanner(routing)
           .plan(_from, _to, [midHazard, _hazard('off', 0.01, 0.05)]);
       expect(plan.route, same(_eastward));
       expect(plan.avoidedCount, 1);
-      expect(routing.avoidRequests.single, hasLength(2));
+      expect(routing.avoidRequests.single, [const LatLng(0.01, 0)]);
+    });
+
+    test('also avoids hazards the way around runs into', () async {
+      final routing = _ScriptedAvoidingRouting([_eastward, _westward]);
+      final plan = await HazardRoutePlanner(routing)
+          .plan(_from, _to, [midHazard, _hazard('east', 0.01, 0.01)]);
+      expect(plan.route, same(_westward));
+      expect(plan.onRoute, isEmpty);
+      expect(routing.avoidRequests.map((a) => a.length), [1, 2]);
+    });
+
+    test('only warns about a hazard seen just by oncoming cars', () async {
+      final routing = _FakeRouting(alternatives: [_direct, _eastward]);
+      final oncoming = _hazard('oncoming', 0.01, 0, headings: const [180]);
+      final plan = await HazardRoutePlanner(routing)
+          .plan(_from, _to, [oncoming]);
+      expect(plan.route, same(_direct));
+      expect(plan.onRoute.single.blocksThisRoute, isFalse);
+      expect(routing.viaRequests, isEmpty);
     });
 
     test('keeps the fastest route when no route avoids them', () async {

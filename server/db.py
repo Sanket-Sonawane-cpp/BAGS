@@ -69,7 +69,10 @@ CREATE TABLE IF NOT EXISTS detections (
     timestamp TEXT NOT NULL,
     hazard_id TEXT,
     -- NULL from app builds that don't send it.
-    car_id TEXT
+    car_id TEXT,
+    -- The reporting car's direction of travel, degrees clockwise from
+    -- north. NULL when unknown (standing still, older app builds).
+    heading REAL
 );
 
 -- Cars that drove past a hazard, detecting, without seeing it.
@@ -97,9 +100,13 @@ def init_db() -> None:
             conn.execute("ALTER TABLE cars ADD COLUMN route TEXT")
         # ...or before detections were grouped into hazards.
         detection_columns = _columns(conn, "detections")
-        for column in ("hazard_id", "car_id"):
+        for column, type_ in (
+            ("hazard_id", "TEXT"),
+            ("car_id", "TEXT"),
+            ("heading", "REAL"),
+        ):
             if column not in detection_columns:
-                conn.execute(f"ALTER TABLE detections ADD COLUMN {column} TEXT")
+                conn.execute(f"ALTER TABLE detections ADD COLUMN {column} {type_}")
         unassigned = conn.execute(
             "SELECT id, type, lat, lng, timestamp FROM detections "
             "WHERE hazard_id IS NULL ORDER BY timestamp"
@@ -191,9 +198,13 @@ def record_sighting(
     lng: float,
     timestamp: datetime,
     car_id: str | None,
+    heading: float | None = None,
 ) -> dict:
     """Stores a detection as a sighting of the live hazard of the same type
     within MERGE_RADIUS_M, or of a new hazard if there's none.
+
+    Direction doesn't split hazards: the same accident seen by cars going
+    both ways is one hazard, with both directions on record.
 
     Returns {"hazard": the hazard as live_hazards() describes it, "new":
     whether this sighting created it, "newly_confirmed": whether this
@@ -204,8 +215,8 @@ def record_sighting(
     with _lock, _connect() as conn:
         conn.execute(
             "INSERT INTO detections "
-            "(id, type, confidence, lat, lng, timestamp, car_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(id, type, confidence, lat, lng, timestamp, car_id, heading) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 detection_id,
                 type_,
@@ -214,6 +225,7 @@ def record_sighting(
                 lng,
                 timestamp.astimezone(timezone.utc).isoformat(),
                 car_id,
+                heading,
             ),
         )
         hazard_id, before = _attach(conn, detection_id, type_, lat, lng, now)
@@ -278,7 +290,10 @@ def _live_hazards(
         confidence: the surest sighting's,
         reporter_ids: the different cars that reported it,
         reports: how many of them there are,
-        confirmed: hazards.is_confirmed for the above.
+        confirmed: hazards.is_confirmed for the above,
+        headings: the directions its reporters were travelling (each one's
+            latest known), in whole degrees, without repeats; empty if none
+            is known.
     """
     where, params = ("WHERE id = ?", (hazard_id,)) if hazard_id else ("", ())
     rows = conn.execute(
@@ -287,7 +302,9 @@ def _live_hazards(
     where = "WHERE hazard_id = ?" if hazard_id else "WHERE hazard_id IS NOT NULL"
     sightings: dict[str, list[sqlite3.Row]] = {}
     for row in conn.execute(
-        f"SELECT hazard_id, car_id, confidence FROM detections {where}", params
+        "SELECT hazard_id, car_id, confidence, heading FROM detections "
+        f"{where} ORDER BY rowid",
+        params,
     ):
         sightings.setdefault(row["hazard_id"], []).append(row)
 
@@ -300,6 +317,12 @@ def _live_hazards(
         # Reports from builds that don't send a car id count as one car.
         reporter_ids = {s["car_id"] or "" for s in seen}
         confidence = max((s["confidence"] for s in seen), default=0.0)
+        # Oldest first, so each reporter ends on its latest direction.
+        headings = {
+            s["car_id"] or "": round(s["heading"]) % 360
+            for s in seen
+            if s["heading"] is not None
+        }
         live.append(
             {
                 "id": row["id"],
@@ -311,6 +334,7 @@ def _live_hazards(
                 "reporter_ids": reporter_ids,
                 "reports": len(reporter_ids),
                 "confirmed": rules.is_confirmed(len(reporter_ids), confidence),
+                "headings": sorted(set(headings.values())),
             }
         )
     return live
@@ -331,18 +355,26 @@ def nearby_hazards(lat: float, lng: float, radius_m: float) -> list[dict]:
     return nearby
 
 
-def record_not_seen(hazard_id: str, car_id: str) -> str | None:
+def record_not_seen(
+    hazard_id: str, car_id: str, heading: float | None = None
+) -> str | None:
     """Notes that `car_id` drove past a hazard, detecting, and didn't see it.
 
     Once CLEAR_VOTES different cars have, all since its last sighting, the
     hazard is deleted. Returns "cleared" then, "noted" if it stays, or None
     for a hazard that's already gone (expired, cleared, or never existed).
+
+    A car going the other way from everyone who saw it (`heading`, its
+    direction of travel) may simply have been on the far carriageway, facing
+    away: its vote is "ignored".
     """
     now = _utcnow()
     with _lock, _connect() as conn:
         found = _live_hazards(conn, now, hazard_id)
         if not found:
             return None
+        if heading is not None and not rules.same_way(heading, found[0]["headings"]):
+            return "ignored"
         conn.execute(
             """
             INSERT INTO not_seen (hazard_id, car_id, timestamp) VALUES (?, ?, ?)
