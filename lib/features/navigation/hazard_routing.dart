@@ -58,8 +58,9 @@ class PlannedRoute {
 
 /// Picks a driving route that avoids road-blocking hazards where it can.
 ///
-/// Only hazards that block the road ([HazardStyle.blocksRoad]) are avoided;
-/// the rest, like potholes, stay on the route as warnings.
+/// Only confirmed hazards that block the road ([worthAvoiding]) are
+/// avoided; the rest, like potholes or a single unconfirmed report, stay on
+/// the route as warnings.
 ///
 /// With OpenRouteService ([RoutingService.canAvoid]) that's one request:
 /// route around every blocking hazard at once. The public OSRM server can't
@@ -89,7 +90,7 @@ class HazardRoutePlanner {
     const distance = Distance();
     final avoidable = [
       for (final h in hazards)
-        if (hazardStyle(h.type).blocksRoad &&
+        if (worthAvoiding(h) &&
             distance(from, _point(h)) > endpointClearanceMeters &&
             distance(to, _point(h)) > endpointClearanceMeters)
           h,

@@ -308,10 +308,11 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
       _progress = progress;
       _update = progress.update(me);
       _lastReroute = null;
-      // The plan already chose to pass these; don't offer them again.
+      // The plan already chose to pass these; don't offer them again. Ones
+      // that were only warnings are offered if they're confirmed later.
       _handled
         ..clear()
-        ..addAll(_onRoute.map((h) => h.hazard));
+        ..addAll(_avoidable(_onRoute));
       _positionSub = ref
           .read(locationServiceProvider)
           .positionStream()
@@ -402,13 +403,16 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
       _applyPlan(plan);
       _progress = progress;
       _update = me == null ? null : progress.update(me);
-      _handled.addAll(plan.onRoute.map((h) => h.hazard));
+      _handled.addAll(_avoidable(plan.onRoute));
     });
   }
 
+  static Iterable<AlertEvent> _avoidable(Iterable<HazardOnRoute> onRoute) =>
+      onRoute.map((h) => h.hazard).where(worthAvoiding);
+
   /// Keeps [_onRoute] current, and while navigating offers a way around a
-  /// hazard newly reported on the road ahead, or the quicker way once a
-  /// hazard is cleared.
+  /// hazard newly reported (or newly confirmed) on the road ahead, or the
+  /// quicker way once a hazard is cleared.
   void _onHazardsChanged(List<AlertEvent> hazards) {
     final before = _knownBefore;
     _knownBefore = hazards;
@@ -430,7 +434,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     final fresh = onRoute
         .where(
           (h) =>
-              hazardStyle(h.hazard.type).blocksRoad &&
+              worthAvoiding(h.hazard) &&
               h.alongMeters > along &&
               distance(me, LatLng(h.hazard.latitude, h.hazard.longitude)) >
                   HazardRoutePlanner.endpointClearanceMeters &&
@@ -443,9 +447,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     }
 
     // The road a cleared hazard closed may now be the quicker way.
-    final cleared = before.any(
-      (old) => hazardStyle(old.type).blocksRoad && !known(old),
-    );
+    final cleared = before.any((old) => worthAvoiding(old) && !known(old));
     if (cleared) unawaited(_offerFasterRoute(me));
   }
 
@@ -501,8 +503,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
     }
     if (!mounted || !_navigating || request != _offerRequest) return;
 
-    int blocking(Iterable<HazardOnRoute> onRoute) =>
-        onRoute.where((h) => hazardStyle(h.hazard.type).blocksRoad).length;
+    int blocking(Iterable<HazardOnRoute> onRoute) => _avoidable(onRoute).length;
     final left = update.remainingSeconds;
     final saved = left - plan.route.durationSeconds;
     final aheadNow = _onRoute.where((h) => h.alongMeters > update.alongMeters);
@@ -572,8 +573,10 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
       ..showSnackBar(
         SnackBar(
           content: Text(
-            '${hazardStyle(hazard.type).label} · reported '
-            '${formatAgo(hazard.timestamp)}',
+            '${hazardStyle(hazard.type).label} · '
+            '${hazard.confirmed ? '' : 'unconfirmed · '}'
+            '${hazard.reports == 1 ? '1 report' : '${hazard.reports} cars'}'
+            ', last seen ${formatAgo(hazard.timestamp)}',
           ),
         ),
       );
@@ -722,9 +725,7 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
   Widget _planCard(BuildContext context) {
     final route = _route;
     final theme = Theme.of(context);
-    final blocking = _onRoute
-        .where((h) => hazardStyle(h.hazard.type).blocksRoad)
-        .length;
+    final blocking = _avoidable(_onRoute).length;
     final warnings = _onRoute.length - blocking;
 
     return Card(
@@ -781,8 +782,8 @@ class _NavigationScreenState extends ConsumerState<NavigationScreen> {
               ),
             if (route != null && !_routing && warnings > 0)
               _Note(
-                '$warnings reported '
-                '${warnings == 1 ? 'pothole or hazard' : 'potholes or hazards'}'
+                '$warnings minor or unconfirmed '
+                '${warnings == 1 ? 'hazard' : 'hazards'}'
                 ' on the way — drive carefully',
               ),
             if (_routing)
@@ -984,17 +985,23 @@ class _HazardDot extends StatelessWidget {
   Widget build(BuildContext context) {
     final style = hazardStyle(hazard.type);
     return Tooltip(
-      message: style.label,
+      message: hazard.confirmed ? style.label : '${style.label} (unconfirmed)',
       child: GestureDetector(
         onTap: onTap,
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: style.color,
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 2),
-            boxShadow: const [BoxShadow(blurRadius: 4, color: Colors.black38)],
+        // Faded until confirmed: shown, but not yet routed around.
+        child: Opacity(
+          opacity: hazard.confirmed ? 1 : 0.5,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: style.color,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2),
+              boxShadow: const [
+                BoxShadow(blurRadius: 4, color: Colors.black38),
+              ],
+            ),
+            child: Icon(style.icon, size: 14, color: Colors.white),
           ),
-          child: Icon(style.icon, size: 14, color: Colors.white),
         ),
       ),
     );

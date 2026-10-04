@@ -191,6 +191,23 @@ void main() {
       expect(plan.onRoute.single.hazard.id, 'pothole');
     });
 
+    test('only warns about a hazard nobody has confirmed', () async {
+      final routing = _FakeRouting(alternatives: [_direct, _eastward]);
+      final unconfirmed = AlertEvent(
+        id: 'maybe',
+        type: 'accident',
+        latitude: 0.01,
+        longitude: 0,
+        timestamp: DateTime.utc(2026),
+        distanceMeters: 0,
+        confirmed: false,
+      );
+      final plan = await HazardRoutePlanner(routing)
+          .plan(_from, _to, [unconfirmed]);
+      expect(plan.route, same(_direct));
+      expect(plan.onRoute.single.hazard.id, 'maybe');
+    });
+
     test('asks a routing engine that can avoid areas to avoid them', () async {
       final routing = _FakeAvoidingRouting(around: _eastward);
       final plan = await HazardRoutePlanner(routing)

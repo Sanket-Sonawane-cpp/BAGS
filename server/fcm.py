@@ -91,6 +91,8 @@ def send_alert(token: str, alert: dict) -> bool:
             "lat": str(alert["lat"]),
             "lng": str(alert["lng"]),
             "timestamp": str(alert["timestamp"]),
+            "confirmed": "true" if alert.get("confirmed", True) else "false",
+            "reports": str(alert.get("reports", 1)),
             "distance_m": str(alert["distance_m"]),
         },
         **_visible_notification(alert),
@@ -119,10 +121,14 @@ def _visible_notification(alert: dict) -> dict:
     else:
         distance_text = f"{round(distance / 10) * 10} m"
 
+    # One unconfirmed report is often a false alarm (see hazards.py), and
+    # says so; it's pushed again once confirmed, replacing this one.
+    confirmed = alert.get("confirmed", True)
     return {
         "notification": messaging.Notification(
-            title=f"{label} ahead",
-            body=f"Reported {distance_text} from you",
+            title=f"{label} ahead" if confirmed else f"Possible {label.lower()} ahead",
+            body=f"Reported {distance_text} from you"
+            + ("" if confirmed else " · unconfirmed"),
         ),
         "android": messaging.AndroidConfig(
             # Normal priority gets held back while the phone dozes, which

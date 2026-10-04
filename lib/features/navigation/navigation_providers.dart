@@ -43,14 +43,12 @@ final hazardRoutePlannerProvider = Provider<HazardRoutePlanner>(
 /// Hazards worth showing on the map and routing around: pushed alerts plus
 /// whatever the server knows about nearby, one entry per hazard.
 ///
-/// The server keeps every detection forever and a car reports the same
-/// hazard many times as it passes, so this drops old reports and merges
-/// repeats of the same thing in the same spot.
+/// The server merges repeat reports into one hazard and drops hazards once
+/// they expire or are cleared. Pushed alerts outside the synced area don't
+/// hear about that, so this also drops reports past their type's
+/// [HazardStyle.lifetime], and merges repeats of the same thing in the same
+/// spot from older servers.
 class KnownHazards extends Notifier<List<AlertEvent>> {
-  /// Reports older than this are dropped. Accidents and fallen objects are
-  /// usually cleared well within it, and nothing reports a hazard as gone.
-  static const Duration maxAge = Duration(hours: 2);
-
   /// Reports of the same type closer than this are one hazard.
   static const double mergeRadiusMeters = 30;
 
@@ -58,11 +56,12 @@ class KnownHazards extends Notifier<List<AlertEvent>> {
 
   @override
   List<AlertEvent> build() {
-    // Only the newly pushed alerts: re-adding the whole history would bring
-    // back reports a refresh has since dropped as deleted on the server.
+    // Only alerts newly pushed, or pushed again with news (now confirmed):
+    // re-adding the whole history would bring back reports a refresh has
+    // since dropped as deleted on the server.
     ref.listen(alertHistoryProvider, (previous, alerts) {
-      final seen = {for (final alert in previous ?? const []) alert.id};
-      _add(alerts.where((alert) => !seen.contains(alert.id)));
+      final seen = Set<AlertEvent>.identity()..addAll(previous ?? const []);
+      _add(alerts.where((alert) => !seen.contains(alert)));
     });
     for (final alert in ref.read(alertHistoryProvider)) {
       _reports[alert.id] = alert;
@@ -109,8 +108,11 @@ class KnownHazards extends Notifier<List<AlertEvent>> {
   }
 
   List<AlertEvent> _merged() {
-    final cutoff = DateTime.now().toUtc().subtract(maxAge);
-    _reports.removeWhere((_, alert) => alert.timestamp.isBefore(cutoff));
+    final now = DateTime.now().toUtc();
+    _reports.removeWhere(
+      (_, alert) =>
+          alert.timestamp.add(hazardStyle(alert.type).lifetime).isBefore(now),
+    );
 
     const distance = Distance();
     final newestFirst = _reports.values.toList()

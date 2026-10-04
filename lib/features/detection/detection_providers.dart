@@ -1,6 +1,16 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:async';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:latlong2/latlong.dart';
+
+import '../../core/hazards.dart';
+import '../../core/models/alert_event.dart';
 import '../../core/models/detection_event.dart';
+import '../../core/providers.dart';
+import '../../core/services/api_service.dart';
+import '../navigation/navigation_providers.dart';
+import 'clearance_watcher.dart';
 import 'detection_pipeline.dart';
 import 'inference_service.dart';
 
@@ -105,3 +115,66 @@ final detectionHistoryProvider =
     NotifierProvider<DetectionHistory, List<DetectionEvent>>(
       DetectionHistory.new,
     );
+
+/// Votes to the server that a known hazard is gone when this car drives
+/// past it, detecting, without seeing it — see [ClearanceWatcher]. Only
+/// while detection runs, and only with reporting on: a vote is a report
+/// too. Watched from HomeShell, so it runs whichever tab is showing.
+final clearanceWatcherProvider = Provider<ClearanceWatcher>((ref) {
+  Future<void> vote(AlertEvent hazard) async {
+    if (!ref.read(reportDetectionsProvider)) return;
+    try {
+      await ref
+          .read(apiServiceProvider)
+          .postNotSeen(hazard.id, carId: ref.read(carIdProvider));
+    } on ApiException {
+      // Offline, or the hazard is already gone: nothing worth retrying.
+    }
+  }
+
+  final watcher = ClearanceWatcher(
+    detectableTypes: {
+      for (final label in modelLabels)
+        if (hazardStyle(label).isHazard) label,
+    },
+    onNotSeen: (hazard) => unawaited(vote(hazard)),
+  );
+
+  // Fixes only while detecting: a pass with the camera off proves nothing.
+  StreamSubscription<Position>? positions;
+  void follow({required bool detecting}) {
+    unawaited(positions?.cancel());
+    positions = null;
+    watcher.reset();
+    if (!detecting) return;
+    positions = ref
+        .read(locationServiceProvider)
+        .positionStream()
+        .listen(
+          (fix) => watcher.moved(
+            LatLng(fix.latitude, fix.longitude),
+            ref.read(knownHazardsProvider),
+          ),
+          // A GPS hiccup; the next fix carries on.
+          onError: (Object _) {},
+        );
+  }
+
+  ref
+    ..listen(
+      detectionRunningProvider,
+      (_, detecting) => follow(detecting: detecting),
+      fireImmediately: true,
+    )
+    ..listen(rawInferenceStreamProvider, (_, frame) {
+      if (frame is AsyncData) watcher.frameChecked();
+    })
+    ..listen(detectionStreamProvider, (_, next) {
+      final event = next.value;
+      if (event != null) {
+        watcher.detected(event.type, LatLng(event.latitude, event.longitude));
+      }
+    })
+    ..onDispose(() => positions?.cancel());
+  return watcher;
+});

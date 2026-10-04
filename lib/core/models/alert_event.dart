@@ -11,6 +11,8 @@ class AlertEvent {
     required this.longitude,
     required this.timestamp,
     required this.distanceMeters,
+    this.confirmed = true,
+    this.reports = 1,
   });
 
   /// Builds an alert from an FCM data payload.
@@ -25,6 +27,9 @@ class AlertEvent {
     longitude: _toDouble(json['lng']),
     timestamp: DateTime.parse(json['timestamp'].toString()).toUtc(),
     distanceMeters: _toDouble(json['distance_m']),
+    // Absent from servers that predate confirmation: trusted, as before.
+    confirmed: json['confirmed']?.toString() != 'false',
+    reports: json['reports'] == null ? 1 : _toDouble(json['reports']).round(),
   );
 
   /// Server-assigned id, used to avoid showing the same alert twice.
@@ -37,11 +42,19 @@ class AlertEvent {
   final double latitude;
   final double longitude;
 
-  /// When it was originally detected, always in UTC.
+  /// When it was last seen, always in UTC.
   final DateTime timestamp;
 
   /// How far this car is from the obstruction, as computed by the server.
   final double distanceMeters;
+
+  /// Whether enough reports back it to send cars a different way: two
+  /// different cars, or one very sure one (the server decides). A single
+  /// report is often a false detection, so until then it's only a warning.
+  final bool confirmed;
+
+  /// How many different cars reported it.
+  final int reports;
 
   static double _toDouble(Object? value) =>
       value is num ? value.toDouble() : double.parse(value.toString());
@@ -53,6 +66,8 @@ class AlertEvent {
     'lng': longitude,
     'timestamp': timestamp.toUtc().toIso8601String(),
     'distance_m': distanceMeters,
+    'confirmed': confirmed,
+    'reports': reports,
   };
 
   @override

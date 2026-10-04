@@ -97,6 +97,17 @@ class ApiService {
     });
   }
 
+  /// Tells the server this car just drove past hazard [hazardId] with
+  /// detection running and didn't see it: a vote that it's gone. A few such
+  /// votes from different cars, with no new sighting, remove it.
+  ///
+  /// Throws [ApiException] (status 404) if the hazard is already gone.
+  Future<void> postNotSeen(String hazardId, {required String carId}) async {
+    await _post('/hazards/${Uri.encodeComponent(hazardId)}/not-seen', {
+      'car_id': carId,
+    });
+  }
+
   static double _round5(double value) =>
       (value * 100000).roundToDouble() / 100000;
 

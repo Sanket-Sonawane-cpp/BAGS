@@ -76,6 +76,9 @@ class DetectionPipeline {
   DateTime? _lastRun;
   bool _busy = false;
   Position? _lastPosition;
+
+  /// The GPS lookup under way, shared by every detection made meanwhile.
+  Future<Position?>? _pendingPosition;
   CameraController? _cameraController;
 
   final StreamController<DetectionEvent> _detections =
@@ -133,38 +136,9 @@ class DetectionPipeline {
   }
 
   Future<void> _process(CameraImage frame) async {
+    ClassificationResult? hit;
     try {
-      final stopwatch = Stopwatch()..start();
-      final result = await inferenceService.run(frame);
-      if (!_rawResults.isClosed) {
-        _rawResults.add(
-          FrameResult(result: result, elapsed: stopwatch.elapsed),
-        );
-      }
-      // A detector reports null when nothing on this frame cleared its own
-      // (lower, pre-NMS) score threshold — nothing to gate here.
-      if (result == null) return;
-
-      // Only a classifier has this convention; a detector's "nothing found"
-      // is already handled by the null check above.
-      if (inferenceService.kind == ModelKind.classifier &&
-          result.classIndex == 0) {
-        return;
-      }
-      if (result.confidence < thresholdFor(result.label)) return;
-
-      final position = await _currentPositionOrNull();
-      if (position == null || _detections.isClosed) return;
-
-      _detections.add(
-        DetectionEvent(
-          type: result.label,
-          confidence: result.confidence,
-          latitude: position.latitude,
-          longitude: position.longitude,
-          timestamp: DateTime.now().toUtc(),
-        ),
-      );
+      hit = await _check(frame);
     } catch (error, stackTrace) {
       // Deliberately broad, not `on Exception`: a malformed frame buffer
       // throws RangeError (an Error), not Exception — that previously
@@ -176,7 +150,57 @@ class DetectionPipeline {
       // ignore: avoid_catches_without_on_clauses
       if (!_rawResults.isClosed) _rawResults.addError(error, stackTrace);
     } finally {
+      // Free for the next frame before finding out where this one was
+      // taken: a GPS fix can take up to [_positionTimeout], and holding on
+      // would drop every frame meanwhile.
       _busy = false;
+    }
+    if (hit != null) await _emit(hit, DateTime.now().toUtc());
+  }
+
+  /// Runs the model on [frame]: what it saw, if it's worth reporting.
+  Future<ClassificationResult?> _check(CameraImage frame) async {
+    final stopwatch = Stopwatch()..start();
+    final result = await inferenceService.run(frame);
+    if (!_rawResults.isClosed) {
+      _rawResults.add(FrameResult(result: result, elapsed: stopwatch.elapsed));
+    }
+    // A detector reports null when nothing on this frame cleared its own
+    // (lower, pre-NMS) score threshold — nothing to gate here.
+    if (result == null) return null;
+
+    // Only a classifier has this convention; a detector's "nothing found"
+    // is already handled by the null check above.
+    if (inferenceService.kind == ModelKind.classifier &&
+        result.classIndex == 0) {
+      return null;
+    }
+    if (result.confidence < thresholdFor(result.label)) return null;
+    return result;
+  }
+
+  /// Tags [result], seen at [seenAt], with where the car is and emits it.
+  Future<void> _emit(ClassificationResult result, DateTime seenAt) async {
+    try {
+      // One lookup for a burst of detections, rather than one per frame.
+      final position = await (_pendingPosition ??= _currentPositionOrNull()
+          .whenComplete(() => _pendingPosition = null));
+      if (position == null || _detections.isClosed) return;
+
+      _detections.add(
+        DetectionEvent(
+          type: result.label,
+          confidence: result.confidence,
+          latitude: position.latitude,
+          longitude: position.longitude,
+          timestamp: seenAt,
+        ),
+      );
+    } catch (error, stackTrace) {
+      // Same reasoning as in _process: one failed lookup mustn't escape as
+      // an unhandled async error.
+      // ignore: avoid_catches_without_on_clauses
+      if (!_rawResults.isClosed) _rawResults.addError(error, stackTrace);
     }
   }
 

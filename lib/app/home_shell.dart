@@ -103,10 +103,12 @@ class _HomeShellState extends ConsumerState<HomeShell> {
 
     // Watched so they start at launch rather than when first shown: FCM
     // registration, the token tracker, and alert history must all be live
-    // before the first push arrives.
+    // before the first push arrives; the clearance watcher must be before
+    // detection starts.
     ref
       ..watch(fcmTokenProvider)
-      ..watch(latestFcmTokenProvider);
+      ..watch(latestFcmTokenProvider)
+      ..watch(clearanceWatcherProvider);
     final alerts = ref.watch(alertHistoryProvider);
     final detecting = ref.watch(detectionRunningProvider);
 

@@ -219,11 +219,10 @@ class AlertHistory extends Notifier<List<AlertEvent>> {
       final alert = next.value;
       if (alert == null) return;
 
-      // The same obstruction can be pushed more than once as the car
-      // approaches it; the server-assigned id is what makes it identifiable.
-      if (state.any((existing) => existing.id == alert.id)) return;
-
-      state = [alert, ...state];
+      // A hazard is pushed again when there's news about it, such as more
+      // cars confirming it: the server-assigned id makes it the same entry,
+      // updated and moved to the top.
+      state = [alert, ...state.where((existing) => existing.id != alert.id)];
     });
 
     return const [];

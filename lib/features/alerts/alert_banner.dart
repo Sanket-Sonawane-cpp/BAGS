@@ -43,7 +43,9 @@ class AlertBanner extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    style.label.toUpperCase(),
+                    alert.confirmed
+                        ? style.label.toUpperCase()
+                        : '${style.label.toUpperCase()} · UNCONFIRMED',
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 14,

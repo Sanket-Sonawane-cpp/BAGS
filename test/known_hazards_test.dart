@@ -6,13 +6,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:latlong2/latlong.dart';
 
-AlertEvent _alert(String id, double lat, double lng) => AlertEvent(
+AlertEvent _alert(
+  String id,
+  double lat,
+  double lng, {
+  String type = 'accident',
+  Duration age = Duration.zero,
+  bool confirmed = true,
+}) => AlertEvent(
   id: id,
-  type: 'accident',
+  type: type,
   latitude: lat,
   longitude: lng,
-  timestamp: DateTime.now().toUtc(),
+  timestamp: DateTime.now().toUtc().subtract(age),
   distanceMeters: 0,
+  confirmed: confirmed,
 );
 
 /// Answers `/alerts` with whatever the test sets, ignoring the area.
@@ -84,5 +92,67 @@ void main() {
 
     history.push(_alert('new', 0.002, 0.002));
     expect(ids(), ['new']);
+  });
+
+  test('a hazard pushed again with news is updated', () {
+    final history =
+        container.read(alertHistoryProvider.notifier) as _FakeHistory;
+    history.push(_alert('a', 0.001, 0, confirmed: false));
+    expect(container.read(knownHazardsProvider).single.confirmed, isFalse);
+
+    history.push(_alert('a', 0.001, 0));
+    expect(container.read(knownHazardsProvider).single.confirmed, isTrue);
+  });
+
+  test('each type is dropped after its own lifetime', () async {
+    api.serverAlerts = [
+      _alert('accident', 0.001, 0, age: const Duration(minutes: 90)),
+      _alert(
+        'pothole',
+        0.002,
+        0,
+        type: 'pothole',
+        age: const Duration(minutes: 90),
+      ),
+    ];
+    await container
+        .read(knownHazardsProvider.notifier)
+        .refreshAround(const LatLng(0, 0), 5000);
+    expect(ids(), ['pothole']);
+  });
+
+  group('AlertEvent.fromJson', () {
+    Map<String, dynamic> json([Map<String, dynamic> extra = const {}]) => {
+      'id': 'h1',
+      'type': 'accident',
+      'lat': '18.5',
+      'lng': '73.8',
+      'timestamp': '2026-10-04T10:00:00+00:00',
+      'distance_m': '120.5',
+      ...extra,
+    };
+
+    test('reads confirmation as FCM sends it, all strings', () {
+      final alert = AlertEvent.fromJson(
+        json({'confirmed': 'false', 'reports': '1'}),
+      );
+      expect(alert.confirmed, isFalse);
+      expect(alert.reports, 1);
+      expect(AlertEvent.fromJson(json({'confirmed': 'true'})).confirmed, true);
+    });
+
+    test('reads confirmation as /alerts sends it', () {
+      final alert = AlertEvent.fromJson(
+        json({'confirmed': false, 'reports': 3}),
+      );
+      expect(alert.confirmed, isFalse);
+      expect(alert.reports, 3);
+    });
+
+    test('trusts alerts from a server that does not say', () {
+      final alert = AlertEvent.fromJson(json());
+      expect(alert.confirmed, isTrue);
+      expect(alert.reports, 1);
+    });
   });
 }
