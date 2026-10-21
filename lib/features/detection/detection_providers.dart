@@ -25,6 +25,7 @@ import 'inference_service.dart';
 /// Replaces the YOLO26n (`assets/models/hazard_detector.tflite`, post-NMS
 /// `[1, 300, 6]` output), still bundled to switch back to.
 const String modelAsset = 'assets/models/hazard_detector_yolo11n.tflite';
+// const String modelAsset = 'assets/models/hazard_detector.tflite';
 
 /// Class order exactly as in the model's metadata (`classes`) — keep in sync
 /// with the ML team's dataset, not guessed independently.
